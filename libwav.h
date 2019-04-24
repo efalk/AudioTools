@@ -7,7 +7,7 @@
 typedef struct chunk {
   char identifier[4];	/* e.g. "RIFF" for the top level */
   uint32_t length;	/* Length of the data that follows */
-  uint32_t offset;		/* Offset into file of this chunk */
+  uint32_t offset;	/* Offset into file of this chunk */
   struct chunk *next;
 } Chunk;
 

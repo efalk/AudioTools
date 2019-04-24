@@ -1,12 +1,14 @@
 static const char usage[] = "usage:\n"
 "	wavtags [options] [tag=value ...] infile [outfile]\n"
-"	wavetags -i file ...\n"
-"	wavetags -l\n"
+"	wavtags -l file ...\n"
+"	wavtags -i file ...\n"
+"	wavtags -l\n"
 "\n"
 "	-h	--help		This list\n"
 "	-v	--verbose	Verbose\n"
 "	-c	--clear		Clear any existing tags\n"
 "	-a	--append	Append tags to list instead of replacing\n"
+"	-l	--list		List current tags and exit\n"
 "	-i	--info		Display format info and exit\n"
 "	-L	--list-tags	List supported tags and exit\n"
 "\n"
@@ -59,6 +61,7 @@ struct option longopts[] = {
   {"verbose", no_argument, NULL, 'v'},
   {"clear", no_argument, NULL, 'c'},
   {"append", no_argument, NULL, 'a'},
+  {"list", no_argument, NULL, 'l'},
   {"info", no_argument, NULL, 'i'},
   {"list-tags", no_argument, NULL, 'L'},
   {0,0,0,0}
@@ -67,6 +70,7 @@ struct option longopts[] = {
 static int verbose = 0;
 static bool clearTags = false;
 static bool appendTags = false;
+static bool showTags = false;
 static bool showInfo = false;
 
 
@@ -80,7 +84,7 @@ main(int argc, char **argv)
     char **tag_replacements;
     int n_replacements = 0;
 
-    while ((c = getopt_long(argc, argv, "hvcLai", longopts, NULL)) != -1)
+    while ((c = getopt_long(argc, argv, "hvcLail", longopts, NULL)) != -1)
     {
       switch (c) {
 	case 'h': printf(usage); return 0;
@@ -89,6 +93,7 @@ main(int argc, char **argv)
 	case 'c': clearTags = true; break;
 	case 'a': appendTags = true; break;
 	case 'i': showInfo = true; break;
+	case 'l': showTags = true; break;
 	case '?': fprintf(stderr, usage); return 2;
       }
     }
@@ -119,8 +124,33 @@ main(int argc, char **argv)
 		continue;
 	    }
 	    waveFile = OpenWaveFile(ifile);
+	    if (waveFile == NULL) {
+		fprintf(stderr, "%s: %s\n", argv[optind], WaveError);
+		continue;
+	    }
 	    printf("%s:\n", argv[optind]);
 	    dumpFormat(waveFile);
+	    putchar('\n');
+	    fclose(ifile);
+	}
+	return 0;
+    }
+
+    if (showTags) {
+	for (; optind < argc; ++optind) {
+	    ifile = fopen(argv[optind], "rb");
+	    if (ifile == NULL) {
+		fprintf(stderr, "unable to open \"%s\", %s\n",
+		    argv[optind], strerror(errno));
+		continue;
+	    }
+	    waveFile = OpenWaveFile(ifile);
+	    if (waveFile == NULL) {
+		fprintf(stderr, "%s: %s\n", argv[optind], WaveError);
+		continue;
+	    }
+	    printf("%s:\n", argv[optind]);
+	    dumpChunks(waveFile->children);
 	    putchar('\n');
 	    fclose(ifile);
 	}
@@ -131,6 +161,10 @@ main(int argc, char **argv)
 
     ifile = fopen(ifilename, "rb");
     waveFile = OpenWaveFile(ifile);
+    if (waveFile == NULL) {
+	fprintf(stderr, "%s: %s\n", ifilename, WaveError);
+	return 4;
+    }
 
     /* Recursively dig through the returned structure looking
      * for info tags.
@@ -348,7 +382,7 @@ addTag(ListChunk *lc, const char *replacement)
 	    return -1;
 	}
     } else {
-	/* Null textChunk means delete the original but don't
+	/* Empty string means delete the original but don't
 	 * replace it with anything.
 	 */
 	textChunk = NULL;
@@ -374,11 +408,13 @@ addTag(ListChunk *lc, const char *replacement)
 	     prev = child, child = child->next)
 	  ;
     }
-
+    /* At this point, child is the node to be removed, if any,
+     * and prev is the pointer to the child's predecessor, or
+     * NULL if child was at start of list.
+     */
     if (textChunk != NULL) {
 	/* Delete and replace */
 	if (child != NULL) {
-	    /* Replace it */
 	    textChunk->header.next = child->next;
 	}
 	if (prev == NULL) {
@@ -386,7 +422,7 @@ addTag(ListChunk *lc, const char *replacement)
 	} else {
 	    prev->next = (Chunk *) textChunk;
 	}
-    } else {
+    } else if (child != NULL) {
 	/* Delete but don't replace */
 	if (prev == NULL) {
 	    lc->children = child->next;
