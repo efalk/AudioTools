@@ -1,0 +1,1460 @@
+#!/usr/bin/env python
+# -*- coding: utf8 -*-
+
+usage = """Dump or edit ID3 data in an mp3 file.
+
+Usage:	id3 [options] file.mp3 ...
+
+Options:
+
+    Output controls:
+
+	-h --help      short help
+	-H --long-help long help
+
+	-v	verbose
+	-s	short form
+	-l	long form output
+	-1	only deal with Id3v1
+	-2	only deal with Id3v2
+
+	-f fmt	Control output format; see long help
+
+	--genres	list genres and exit
+	--frame-types	list Id3v2 frame types and exit
+	--image-types	list picture types and exit
+
+	--write-images dir	Extract all images to dir
+
+    Edit Id3 tags:
+
+	These options modify the mp3 file.
+
+	-a str		Set artist
+	-A str		Set album
+	-t str		Set title
+	-c str		Set comment
+	-c [[lang:]desc:]str Set comment with metadata. Lang defaults to "eng"
+	-n N		Set track # (may be a string for Id3v2)
+	-G genre	Set genre by number (Id3v1)
+	-G genre	Set genre by number or string (Id3v2)
+	-Y nnnn		Set year
+
+	-T fid:str	Set arbitrary text frame, see --frame-types for list
+	-T fid:		Delete text frame
+
+	-T TXXX:desc:str    Set TXXX frame. These are text frames with a description
+	-T TXXX:desc:	    Delete TXXX frame.
+
+	--delete	delete Id3 tag(s)
+
+	--add-image file:TYPE[:description]	Add a picture.
+	--remove-image TYPE			Remove a picture
+
+	--encoding latin1|utf8|utf16|utf16-be	Set encoding (default utf8)
+	--2.3					Write Id3v2.3 tag
+	--2.4					Write Id3v2.4 tag (default)
+"""
+
+long_help = """
+
+	Output formats: Format string is literal text plus directives, e.g.
+	    '%f: "%t", artist=%a, album=%A, length=%TLEN'
+
+	  Directives are:
+	      %f	    filename
+	      %a	    artist
+	      %A	    album
+	      %t	    title
+	      %c	    comment
+	      %n	    track #
+	      %G	    genre
+	      %Y	    year
+	      %XXXX	    Id3V2 frame
+
+	Some Id3v2 text frames map to Id3v1 fields, e.g. setting the
+	artist with -a also sets the TPE1 frame.
+
+	Id3v1 text fields are always encoded with latin1. Avoid
+	strings that can't be encoded with latin1 if you're writing
+	an id3v1 tag, or if you've selected "--encoding latin1".
+	Unencodable characters will quietly be replaced with '?'.
+
+	The --2.3 and --2.4 flags are ignored if there is already an
+	existing Id3v2 tag, in which case that's the version used.
+
+	Editing options are processed in order. For example,
+	    --remove -a "Annie Lennox" -t "Sisters"
+	would erase the existing ID3 tag and start a new one.
+
+	Where possible, this tool over-writes the existing tags in place.
+	Otherwise, it will re-write the entire .mp3 file, which may take
+	longer and requires the use of a temporary file.
+
+Exit codes:
+
+	0 - command accepted, successful return
+	1 - ID3 data not found
+	2 - user error
+	3 - system error
+
+Bugs and issues:
+
+	Id3v2.3 and Id3v2.4 define different sets of frames. This app
+	doesn't care and supports any kind of frame on any version of Id3v2.
+	In fact, and frame whose ident starts with 'T' is accepted as a
+	text frame.
+
+	Doest not support Id3v2 earlier than 2.3
+
+	Id3v2.4 allows text frames to have multiple strings. This app
+	does not support this.
+
+	The standard allows for multiple frames with the same tag,
+	e.g. two "TALB" tags. This app will display all frames, but
+	when modifying a frame, only modifies the first instance of
+	a frame. Likewise, only the first instance of a frame will
+	be displayed when using a custom format.
+"""
+
+# Programming note: most strings are stored internally as unicode (the
+# exception is the ident field). The str() and repr() functions will
+# convert that unicode to latin1. Id3v1 tags use latin1 internally.
+# Id3v2 use latin1, utf16, or utf8.
+
+import sys
+import os
+import string
+import errno
+import signal
+import getopt
+import re
+import struct
+
+verbose = 0
+shortform = False
+longform = False
+encoding = 'utf-8'
+iencoding = 3
+id3v2_version = "2.4"
+
+TERM_ENC = 'utf-8'      # Terminal encoding. TODO: get from environment.
+
+class Mp3Info(object):
+  """Info about the MP3 file that holds these ID3 tags."""
+  def __init__(self, filename = None):
+    self.id3v1_offset = 0       # Location and size of the Id3v1 tag, if any
+    self.id3v1_size = 0
+    self.id3v2_offset = 0       # Location and size of the Id3v2 tag, if any
+    self.id3v2_size = 0
+    self.audio_offset = 0       # Location and size of the MP3 audio data
+    self.audio_size = 0
+    self.size = 0               # Total size of the file
+    if filename:
+      self.examine(filename)
+  def examine(self, filename):
+    """Examine an mp3 file to determine if it has id3 tags."""
+    self.size = os.path.getsize(filename)
+    self.audio_offset = 0
+    self.audio_size = self.size
+    with open(filename) as ifile:
+      # Look for trailing Id3v1 tag
+      ifile.seek(self.size - 128)
+      tag = ifile.read(3)
+      if tag == "TAG":
+        self.id3v1_offset = self.size - 128
+        self.id3v1_size = 128
+        self.audio_size -= 128
+      # Look for leading Id3v2 tag
+      ifile.seek(0)
+      header = ifile.read(10)
+      if header[0:3] == "ID3":
+        self.id3v2_offset = 0
+        self.id3v2_size = 10 + Id3V2.syncsafe(header[6:10])
+        # A couple basic sanity checks
+        if self.id3v2_size > self.audio_size:
+          print >>sys.stderr, "%s: id3 tag size %d is impossibly large" % \
+              (filename, self.id3v2_size)
+          self.id3v2_size = 0
+        else:
+          self.audio_offset += self.id3v2_size
+          self.audio_size -= self.id3v2_size
+      else:
+        # Look for trailing Id3v2 tag
+        # Look for a footer
+        ifile.seek(self.audio_size - 10)
+        foot = ifile.read(10)
+        if foot[0:3] == "ID3" and ord(foot[3]) >= 4 and (ord(foot[5]) & 0x10):
+          # Found one
+          self.id3v2_size = 10 + Id3V2.syncsafe(foot[6:10])
+          if self.id3v2_size > self.audio_size:
+            print >>sys.stderr, "%s: id3 tag size %d is impossibly large" % \
+                (filename, self.id3v2_size)
+            self.id3v2_size = 0
+          else:
+            self.id3v2_offset = self.audio_size - self.id3v2_size
+            self.audio_size -= self.id3v2_size
+  def __repr__(self):
+    return "<Mp3Info v1=(%d,%d), v2=(%d,%d), a=(%d,%d)>" % \
+      (self.id3v1_offset, self.id3v1_size,
+      self.id3v2_offset, self.id3v2_size,
+      self.audio_offset, self.audio_size)
+
+class Id3(object):
+  """Abstract superclass to V1 and V2"""
+  def __init__(self):
+    self.filename = None
+    self.version = u""
+    self.title = u""
+    self.artist = u""
+    self.album = u""
+    self.year = u""
+    self.comment = u""
+    self.genre = 0
+    self.track = u""
+    self.total_size = 0
+  def read(self, ifile, offset):
+    return False        # subclass this
+
+  def dump(self):
+    global shortform, longform
+    if shortform:
+      print (u" id3v%-4s  %4s  %-30s  %-30s  %-30s  %4s" % (self.version,
+        int2str(self.track), self.artist,
+        self.title, self.album, self.year)).encode(TERM_ENC)
+    else:
+      print " id3v%s data:" % self.version
+      if self.title:   print "    title:", self.title.encode(TERM_ENC)
+      if self.artist:  print "   artist:", self.artist.encode(TERM_ENC)
+      if self.album:   print "    album:", self.album.encode(TERM_ENC)
+      if self.year:    print "     year:", self.year.encode(TERM_ENC)
+      if self.comment: print "  comment:", self.comment.encode(TERM_ENC)
+      if self.genre:   print "    genre: %d (%s)" % (self.genre, self.genreStr())
+      if self.track:   print "    track:", self.track
+
+  def genreStr(self):
+    return Id3.GENRES.get(self.genre, "unknown")
+
+  def __repr__(self):
+    if self.track is not None:
+      rval = '<id3v%s: %s, %s, %s, %s, T%s, G%d>' % \
+        (self.version, self.artist, self.album, self.title,
+                self.year, self.track, self.genre)
+    else:
+      rval = '<id3v%s: %s, %s, %s, %s, G%d>' % \
+        (self.version, self.artist, self.album, self.title,
+                self.year, self.genre)
+    return rval.encode('latin1', 'replace')
+
+  format_scanner = re.Scanner([
+    (r'''\\.''', lambda s,t: t),
+    (r'''%[%A-Za-z\d]+''', lambda s,t: t),
+    (r'''[^%]+''', lambda s,t: t),
+  ])
+
+  def formatted(self, format_str):
+    tokens, remainder = Id3.format_scanner.scan(format_str)
+    tokens = [self.getField(x) if x.startswith('%') else x for x in tokens]
+    return u''.join(tokens) + remainder
+
+  def getField(self, field):
+    if field == '%%': return '%'
+    if field == '%f': return self.filename
+    if field == '%a': return self.artist
+    if field == '%A': return self.album
+    if field == '%t': return self.title
+    if field == '%c': return self.comment
+    if field == '%n': return unicode(self.track)
+    if field == '%G': return unicode(self.genre)
+    if field == '%Y': return self.year
+    return u''
+
+
+  GENRES = {
+    # From the standard
+      0: "Blues", 1: "Classic Rock", 2: "Country", 3: "Dance",
+      4: "Disco", 5: "Funk", 6: "Grunge", 7: "Hip-Hop",
+      8: "Jazz", 9: "Metal", 10: "New Age", 11: "Oldies",
+      12: "Other", 13: "Pop", 14: "Rhythm and Blues", 15: "Rap",
+      16: "Reggae", 17: "Rock", 18: "Techno", 19: "Industrial",
+      20: "Alternative", 21: "Ska", 22: "Death Metal", 23: "Pranks",
+      24: "Soundtrack", 25: "Euro-Techno", 26: "Ambient", 27: "Trip-Hop",
+      28: "Vocal", 29: "Jazz & Funk", 30: "Fusion", 31: "Trance",
+      32: "Classical", 33: "Instrumental", 34: "Acid", 35: "House",
+      36: "Game", 37: "Sound clip", 38: "Gospel", 39: "Noise",
+      40: "Alternative Rock", 41: "Bass", 42: "Soul", 43: "Punk",
+      44: "Space", 45: "Meditative",
+      46: "Instrumental Pop", 47: "Instrumental Rock",
+      48: "Ethnic", 49: "Gothic", 50: "Darkwave", 51: "Techno-Industrial",
+      52: "Electronic", 53: "Pop-Folk", 54: "Eurodance", 55: "Dream",
+      56: "Southern Rock", 57: "Comedy", 58: "Cult", 59: "Gangsta",
+      60: "Top 40", 61: "Christian Rap", 62: "Pop/Funk", 63: "Jungle music",
+      64: "Native US", 65: "Cabaret", 66: "New Wave", 67: "Psychedelic",
+      68: "Rave", 69: "Showtunes", 70: "Trailer", 71: "Lo-Fi",
+      72: "Tribal", 73: "Acid Punk", 74: "Acid Jazz", 75: "Polka",
+      76: "Retro", 77: "Musical", 78: "Rock ’n’ Roll", 79: "Hard Rock",
+    # Winamp extensions
+      80: "Folk", 81: "Folk-Rock", 82: "National Folk", 83: "Swing",
+      84: "Fast Fusion", 85: "Bebop", 86: "Latin", 87: "Revival",
+      88: "Celtic", 89: "Bluegrass", 90: "Avantgarde", 91: "Gothic Rock",
+      92: "Progressive Rock", 93: "Psychedelic Rock",
+      94: "Symphonic Rock", 95: "Slow Rock",
+      96: "Big Band", 97: "Chorus", 98: "Easy Listening", 99: "Acoustic",
+      100: "Humour", 101: "Speech", 102: "Chanson", 103: "Opera",
+      104: "Chamber Music", 105: "Sonata", 106: "Symphony", 107: "Booty Bass",
+      108: "Primus", 109: "Porn Groove", 110: "Satire", 111: "Slow Jam",
+      112: "Club", 113: "Tango", 114: "Samba", 115: "Folklore",
+      116: "Ballad", 117: "Power Ballad",
+      118: "Rhythmic Soul", 119: "Freestyle",
+      120: "Duet", 121: "Punk Rock", 122: "Drum Solo", 123: "A cappella",
+      124: "Euro-House", 125: "Dance Hall",
+      126: "Goa music", 127: "Drum & Bass",
+      128: "Club-House", 129: "Hardcore Techno", 130: "Terror", 131: "Indie",
+      132: "BritPop", 133: "Negerpunk", 134: "Polsk Punk", 135: "Beat",
+      136: "Christian Gangsta Rap", 137: "Heavy Metal",
+      138: "Black Metal", 139: "Crossover",
+      140: "Contemporary Christian", 141: "Christian Rock",
+      142: "Merengue", 143: "Salsa",
+      144: "Thrash Metal", 145: "Anime", 146: "Jpop", 147: "Synthpop",
+      148: "Abstract", 149: "Art Rock", 150: "Baroque", 151: "Bhangra",
+      152: "Big beat", 153: "Breakbeat", 154: "Chillout", 155: "Downtempo",
+      156: "Dub", 157: "EBM", 158: "Eclectic", 159: "Electro",
+      160: "Electroclash", 161: "Emo", 162: "Experimental", 163: "Garage",
+      164: "Global", 165: "IDM", 166: "Illbient", 167: "Industro-Goth",
+      168: "Jam Band", 169: "Krautrock", 170: "Leftfield", 171: "Lounge",
+      172: "Math Rock", 173: "New Romantic", 174: "Nu-Breakz", 175: "Post-Punk",
+      176: "Post-Rock", 177: "Psytrance", 178: "Shoegaze", 179: "Space Rock",
+      180: "Trop Rock", 181: "World Music",
+      182: "Neoclassical", 183: "Audiobook",
+      184: "Audio Theatre", 185: "Neue Deutsche Welle",
+      186: "Podcast", 187: "Indie-Rock",
+      188: "G-Funk", 189: "Dubstep", 190: "Garage Rock", 191: "Psybient",
+  }
+
+
+class Id3V1(Id3):
+  @classmethod
+  def readFromFile(cls, filename, mp3info):
+    """Given a file, read the Id3v1 tag from the end of it, if any."""
+    if mp3info.id3v1_size == 0: return None
+    with open(filename, "rb") as ifile:
+      id3v1 = Id3V1()
+      if id3v1.read(ifile, mp3info.id3v1_offset):
+        id3v1.filename = filename
+        return id3v1
+      else:
+        return None
+
+  def __init__(self):
+    Id3.__init__(self)
+    self.version = "1"
+    self.total_size = 128
+
+  def read(self, ifile, offset):
+    ifile.seek(offset)
+    buf = ifile.read(128)
+    if buf[0:3] != "TAG": return False
+    self.title = buf[3:33].decode('latin1').rstrip('\0')
+    self.artist = buf[33:63].decode('latin1').rstrip('\0')
+    self.album = buf[63:93].decode('latin1').rstrip('\0')
+    self.year = buf[93:97].decode('latin1').rstrip('\0')
+    self.genre = ord(buf[127])
+    comment = buf[97:127]
+    # Look for v1.1
+    if comment[28] == '\0' and comment[29] != '\0':
+      self.track = unicode(ord(comment[29]))
+      comment = comment[0:28]
+      self.version = "1.1"
+    self.comment = comment.decode('latin1').rstrip('\0')
+    return True
+
+  def write(self, ofile):
+    title = self.title.encode('latin1', 'replace')[:30].ljust(30,'\0')
+    artist = self.artist.encode('latin1', 'replace')[:30].ljust(30,'\0')
+    album = self.album.encode('latin1', 'replace')[:30].ljust(30,'\0')
+    year = self.year.encode('latin1', 'replace')[:4].ljust(4,'\0')
+    comment = self.comment.encode('latin1', 'replace')[:28].ljust(28,'\0')
+    trk = str2int(self.track, 0)
+    buf = struct.pack("3s30s30s30s4s28sBBB", "TAG",
+        title, artist, album, year, comment, 0, str2int(self.track, 0), self.genre)
+    ofile.write(buf)
+
+class Id3V2(Id3):
+  # Id3v2 flags
+  F_UNSYNC = 0x80
+  F_EXTHDR = 0x40
+  F_EXPERIMENTAL = 0x20
+  F_FOOTER = 0x10       # 2.4 and above only
+  # Id3v2.3 frame flags
+  FF3_TAG_ALTER = 0x8000
+  FF3_FILE_ALTER = 0x4000
+  FF3_READ_ONLY = 0x2000
+  FF3_COMPRESSION = 0x0080
+  FF3_ENCRYPTION = 0x0040
+  FF3_GROUP = 0x0020
+  # Id3v2.4 frame flags
+  FF4_TAG_ALTER = 0x4000
+  FF4_FILE_ALTER = 0x2000
+  FF4_READ_ONLY = 0x1000
+  FF4_GROUP = 0x0040
+  FF4_COMPRESSION = 0x0008
+  FF4_ENCRYPTION = 0x0004
+  FF4_UNSYNC = 0x0002
+  FF4_DATA_LEN = 0x0001
+
+  @classmethod
+  def readFromFile(cls, filename, mp3info):
+    """Given a file, read the Id3v2 tag from it, if any."""
+    if mp3info.id3v2_size == 0: return None
+    with open(filename, "rb") as ifile:
+      id3v2 = Id3V2()
+      if id3v2.read(ifile, mp3info.id3v2_offset):
+        id3v2.filename = filename
+        return id3v2
+      else:
+        return None
+
+  def __init__(self, major=3):
+    Id3.__init__(self)
+    self.frames = []
+    self.version = "2"
+    self.major_version = major
+    self.ext_header = None
+    self.flags = 0
+    self.size = 0               # Size of tag, not counting headers
+    self.content_size = 0       # Size of actual content, including ext_header
+                                # but not including header, padding, or footer
+    self.total_size = 10        # Size of tag, including headers
+
+  def read(self, ifile, offset):
+    global verbose
+    ifile.seek(offset)
+    head = ifile.read(10)
+    #print "header:", [c for c in head]
+    (_, major, minor, flags, size) = struct.unpack(">3sBBB4s", head)
+    size = Id3V2.syncsafe(size)
+    self.version = "2.%d" % major
+    self.major_version = major
+    if self.major_version < 3:
+      print >>sys.stderr, "Id3v2.%d version not supported" % \
+          self.major_version
+      return False
+    self.flags = flags
+    self.content_size = 0
+    self.size = size
+    self.total_size = 10 + self.size
+    if self.flags & Id3V2.F_FOOTER: self.total_size += 10
+    rem = self.size
+    if self.flags & Id3V2.F_EXTHDR:
+      # There's an extended header present. There's nothing
+      # there we actually need. I've never heard of an app that
+      # even uses it.
+      self.ext_header = Id3V2.ExtendedHeader(self, ifile)
+      self.content_size += self.ext_header.size
+      rem -= self.ext_header.size
+    while rem > 0:
+      #print rem, "bytes remaining"
+      frame = self.read_frame(ifile)
+      if not frame: break
+      self.frames.append(frame)
+      self.content_size += frame.total_size
+      rem -= frame.total_size
+    return True
+
+  def write(self, ofile):
+    global verbose
+    maj = self.major_version
+    buf = struct.pack(">3sbbbI",
+        "ID3", maj,0, self.flags, Id3V2.int2syncsafe(self.size))
+    ofile.write(buf)
+    if self.ext_header:
+      self.ext_header.write(self, ofile)
+    for frame in self.frames:
+      frame.write(self, ofile)
+    if self.size > self.content_size:
+      padding = self.size - self.content_size
+      ofile.write('\0'*padding)
+    if self.flags & Id3V2.F_FOOTER:
+      ofile.write(buf)
+
+  def add_frame(self, frame):
+    try:
+      idx = self.frames.index(frame)
+      self.frames[idx] = frame
+    except ValueError:
+      self.frames.append(frame)
+
+  def del_frame(self, frame):
+    """Find a frame that matches this one and delete it."""
+    try:
+      idx = self.frames.index(frame)
+      del self.frames[idx]
+    except ValueError:
+      pass
+
+  def add_or_del_frame(self, frame, value):
+    """If value, whatever it is, is false, delete the matching frame. Else,
+    replace it with this one."""
+    if value: self.add_frame(frame)
+    else: self.del_frame(frame)
+
+  def read_frame(self, ifile):
+    maj = self.major_version
+    head = ifile.read(10)
+    if head[0] == '\0': return None
+    #print "header:", [c for c in head]
+    ident, size, flags = struct.unpack(">4sIH", head)
+    # There may be extra data in the frame. For now, read
+    # and discard it.
+    if maj == 3:
+      if flags & Id3V2.FF3_COMPRESSION:
+        decompressed_size = ifile.read(4)
+        size -= 4
+      if flags & Id3V2.FF3_ENCRYPTION:
+        encryption_method = ifile.read(1)
+        size -= 1
+      if flags & Id3V2.FF3_GROUP:
+        group = ifile.read(1)
+        size -= 1
+    elif maj == 4:
+      size = Id3V2.syncsafe(size)
+      if flags & Id3V2.FF4_GROUP:
+        group = ifile.read(1)
+        size -= 1
+      if flags & Id3V2.FF4_ENCRYPTION:
+        encryption_method = ifile.read(1)
+        size -= 1
+      if flags & Id3V2.FF4_DATA_LEN:
+        decompressed_size = ifile.read(4)
+        size -= 4
+    if ident == 'TLEN':
+      return Id3V2.TlenFrame().read(ident, size, flags, ifile)
+    elif ident == 'TCOP':
+      return Id3V2.TcopFrame().read(ident, size, flags, ifile)
+    elif ident == 'TXXX':
+      return Id3V2.TxxxFrame().read(ident, size, flags, ifile)
+    elif ident[0] == 'T':
+      frame = Id3V2.TextFrame().read(ident, size, flags, ifile)
+      # Look for a few standard fields
+      if ident == "TALB": self.album = unicode(frame)
+      elif ident == "TIT2": self.title = unicode(frame)
+      elif ident == "TPE1": self.artist = unicode(frame)
+      elif ident == "TYER": self.year = unicode(frame)
+      elif ident == 'TRCK': self.track = unicode(frame)
+      elif ident == 'TCON': self.genre = str2int(str(frame), 0)
+      elif ident in ("TDRC", "TDRL", "TDEN", "TDOR", "TDTG", "TORY") and not self.year:
+        self.year = unicode(frame)[:4]
+      return frame
+    elif ident == 'COMM':
+      frame = Id3V2.CommFrame().read(ident, size, flags, ifile)
+      self.comment = unicode(frame)
+      return frame
+    elif ident[0] == 'W':
+      return Id3V2.UrlFrame().read(ident, size, flags, ifile)
+    elif ident == 'APIC':
+      return Id3V2.ApicFrame().read(ident, size, flags, ifile)
+    else:
+      return Id3V2.Frame().read(ident, size, flags, ifile)
+
+  def append(self, frame):
+    self.frames.append(frame)
+
+  def set_size(self, size):
+    """Set the size of the tag, not including header."""
+    if size < self.content_size:
+      raise Id3V2.Id3Error("Attempt to set id3v2 tag size too small")
+    self.size = size
+    self.total_size = 10 + size
+    if self.flags & Id3V2.F_FOOTER: self.total_size += 10
+
+  def compute_size(self):
+    """Determine how much size this tag will require."""
+    size = 0
+    if self.ext_header:
+      size += self.ext_header.total_size
+    for frame in self.frames:
+      size += frame.total_size
+    self.size = size
+    self.content_size = size
+    self.total_size = 10 + self.size
+    if self.flags & Id3V2.F_FOOTER: self.total_size += 10
+
+  def dump(self):
+    global shortform, longform
+    if shortform:
+      Id3.dump(self)
+    else:
+      Id3.dump(self)
+      for frame in self.frames:
+        print " ", frame.full_str().encode(TERM_ENC)
+      if longform:
+        print "Padding: %d bytes" % (self.size - self.content_size)
+
+  def getField(self, field):
+    if len(field) == 2:
+      return Id3.getField(self, field)
+    field = field[1:]
+    for frame in self.frames:
+      if frame.ident == field:
+        return unicode(frame)
+    return u'-'
+
+  @staticmethod
+  def syncsafe(buf):
+    if type(buf) == int:
+      buf = [buf>>24 & 0xff, buf>>16 & 0xff, buf>>8 & 0xff, buf & 0xff]
+      return reduce(lambda a,b: a<<7|b, [c for c in buf])
+    else:
+      return reduce(lambda a,b: a<<7|b, [ord(c) for c in buf])
+
+  @staticmethod
+  def int2syncsafe(i):
+    """Convert int to syncsafe int."""
+    buf = [i>>21 & 0x7f, i>>14 & 0x7f, i>>7 & 0x7f, i & 0x7f]
+    return reduce(lambda a,b: a<<8|b, [b for b in buf])
+
+
+  @staticmethod
+  def readBytes(buf):
+    return reduce(lambda a,b: a<<8|b, [ord(c) for c in buf])
+
+  @staticmethod
+  def decode(buf, encoding):
+    if encoding == 0: return buf.decode("latin1").rstrip('\0')
+    if encoding == 1: return buf.decode("utf-16").rstrip('\0')
+    if encoding == 2: return buf.decode("utf-16BE").rstrip('\0')
+    return buf.decode("utf-8").rstrip('\0')
+
+  IMAGE_TYPES = ( "OTHER", "ICON", "OTHER_ICON", "FRONT_COVER", "BACK_COVER",
+    "LEAFLET", "MEDIA", "LEAD_ARTIST", "ARTIST", "CONDUCTOR", "BAND",
+    "COMPOSER", "LYRICIST", "RECORDING_LOCATION", "DURING_RECORDING",
+    "DURING_PERFORMANCE", "VIDEO", "BRIGHT_COLORED_FISH", "ILLUSTRATION",
+    "BAND_LOGO", "PUBLISHER_LOGO",)
+
+  FRAME_TYPES = {
+    "AENC": "Audio encryption",
+    "APIC": "Attached picture",
+    "ASPI": "Audio seek point index",
+    "COMM": "Comments",
+    "COMR": "Commercial frame",
+    "ENCR": "Encryption method registration",
+    "EQU2": "Equalisation (2)",
+    "EQUA": "Equalization",
+    "ETCO": "Event timing codes",
+    "GEOB": "General encapsulated object",
+    "GRID": "Group identification registration",
+    "IPLS": "Involved people list",
+    "LINK": "Linked information",
+    "MCDI": "Music CD identifier",
+    "MLLT": "MPEG location lookup table",
+    "OWNE": "Ownership frame",
+    "PCNT": "Play counter",
+    "POPM": "Popularimeter",
+    "POSS": "Position synchronisation frame",
+    "PRIV": "Private frame",
+    "RBUF": "Recommended buffer size",
+    "RVA2": "Relative volume adjustment (2)",
+    "RVAD": "Relative volume adjustment",
+    "RVRB": "Reverb",
+    "SEEK": "Seek frame",
+    "SIGN": "Signature frame",
+    "SYLT": "Synchronized lyric/text",
+    "SYTC": "Synchronized tempo codes",
+    "TALB": "Album/Movie/Show title",
+    "TBPM": "BPM (beats per minute)",
+    "TCOM": "Composer",
+    "TCON": "Content type",
+    "TCOP": "Copyright message",
+    "TDAT": "Date",
+    "TDEN": "Encoding time",
+    "TDLY": "Playlist delay",
+    "TDOR": "Original release time",
+    "TDRC": "Recording time",
+    "TDRL": "Release time",
+    "TDTG": "Tagging time",
+    "TENC": "Encoded by",
+    "TEXT": "Lyricist/Text writer",
+    "TFLT": "File type",
+    "TIME": "Time",
+    "TIPL": "Involved people list",
+    "TIT1": "Content group description",
+    "TIT2": "Title/songname/content description",
+    "TIT3": "Subtitle/Description refinement",
+    "TKEY": "Initial key",
+    "TLAN": "Language(s)",
+    "TLEN": "Length",
+    "TMCL": "Musician credits list",
+    "TMED": "Media type",
+    "TMOO": "Mood",
+    "TOAL": "Original album/movie/show title",
+    "TOFN": "Original filename",
+    "TOLY": "Original lyricist(s/text writer(s))",
+    "TOPE": "Original artist(s/performer(s))",
+    "TORY": "Original release year",
+    "TOWN": "File owner/licensee",
+    "TPE1": "Lead performer(s)/Soloist(s)",
+    "TPE2": "Band/orchestra/accompaniment",
+    "TPE3": "Conductor/performer refinement",
+    "TPE4": "Interpreted, remixed, or otherwise modified by",
+    "TPOS": "Part of a set",
+    "TPRO": "Produced notice",
+    "TPUB": "Publisher",
+    "TRCK": "Track number/Position in set",
+    "TRDA": "Recording dates",
+    "TRSN": "Internet radio station name",
+    "TRSO": "Internet radio station owner",
+    "TSIZ": "Size",
+    "TSOA": "Album sort order",
+    "TSOP": "Performer sort order",
+    "TSOT": "Title sort order",
+    "TSRC": "ISRC (international standard recording code)",
+    "TSSE": "Software/Hardware and settings used for encoding",
+    "TSST": "Set subtitle",
+    "TXXX": "User defined text information frame",
+    "TYER": "Year",
+    "UFID": "Unique file identifier",
+    "USER": "Terms of use",
+    "USLT": "Unsychronized lyric/text transcription",
+    "USLT": "Unsynchronised lyric/text transcription",
+    "WCOM": "Commercial information",
+    "WCOP": "Copyright/Legal information",
+    "WOAF": "Official audio file webpage",
+    "WOAR": "Official artist/performer webpage",
+    "WOAS": "Official audio source webpage",
+    "WORS": "Official Internet radio station homepage",
+    "WPAY": "Payment",
+    "WPUB": "Publishers official webpage",
+    "WXXX": "User defined URL link frame",
+  }
+
+  ENCODINGS = ("latin1", "utf16", "utf16-be", "utf8")
+
+  class Id3Error(Exception):
+    pass
+
+  class Id3Argument(Exception):
+    pass
+
+  class ExtendedHeader(object):
+    def __init__(self, id3v2 = None, ifile = None):
+      self.size = 0
+      self.flags = 0
+      if ifile:
+        self.read(id3v2, ifile)
+    def read(self, id3v2, ifile):
+      if id3v2.major_version == 3:
+        self.header = ifile.read(4)
+        self.size = struct.unpack(">I", header)[0]
+        self.data = ifile.read(self.size)
+        self.total_size = 4 + self.size
+      else:
+        self.header = ifile.read(4)
+        self.size = Id3V2.syncsafe(self.header) - 4
+        self.data = ifile.read(self.size)
+        self.total_size = 4 + self.size
+      # Someday we may want to parse the actual extended header data.
+      # Today is not that day.
+    def write(self, id3v2, ofile):
+      ofile.write(self.header)
+      ofile.write(self.data)
+
+
+  class Frame(object):
+    """Generic Id3v2 frame object, and superclass to all frames."""
+    def __init__(self):
+      """Create empty frame object."""
+      self.ident = None
+      self.size = 0
+      self.flags = 0
+      self.data = None
+      self.total_size = 10 + self.size
+    def read(self, ident, size, flags, ifile):
+      """Set header info and read data from file."""
+      self.ident = ident
+      self.size = size
+      self.flags = flags
+      if ifile:
+        self.data = ifile.read(size)
+      self.total_size = 10 + size
+      return self
+    def set(self, ident, size, flags, data):
+      """Set header info and data."""
+      self.ident = ident
+      self.size = size
+      self.flags = flags
+      self.data = data
+      self.total_size = 10 + size
+      return self
+    def write(self, id3, ofile):
+      """Write frame to file."""
+      global verbose
+      maj = id3.major_version
+      size = self.size
+      if maj >= 4: size = Id3V2.int2syncsafe(size)
+      buf = struct.pack(">4sIH", self.ident, size, 0)
+      ofile.write(buf)
+      ofile.write(self.data)
+    def full_str(self):
+      return u'%s: (%d bytes) flags=%#x' % \
+          (Id3V2.frameName(self.ident), self.size, self.flags)
+    def __repr__(self):
+      return '<Frame \"%s\" size=%d flags=%#x>' % \
+          (self.ident, self.size, self.flags)
+    def __str__(self):
+      return unicode(self).encode('latin1', 'replace')
+    def __unicode__(self):
+      return u'%s (%d bytes)' % (self.ident, self.size)
+    def __eq__(self, other):
+      """Without knowing more about the frame type, we consider two frames to be
+      equal if they have the same ident."""
+      return self.ident == other.ident
+
+  class TextFrame(Frame):
+    def __init__(self):
+      Id3V2.Frame.__init__(self)
+      self.iencoding = 0
+    def read(self, ident, size, flags, ifile):
+      Id3V2.Frame.read(self, ident, size, flags, ifile)
+      self.iencoding = ord(self.data[0])
+      return self
+    def set(self, ident, text, iencoding):
+      data = chr(iencoding) + encode(text, iencoding)
+      size = len(data)
+      self.iencoding = iencoding
+      Id3V2.Frame.set(self, ident, size, 0, data)
+      return self
+    def full_str(self):
+      return u'%s: %s' % (Id3V2.frameName(self.ident), unicode(self))
+    def __repr__(self):
+      return '<Text Frame "%s" size=%d flags=%#x, encoding=%d, "%s">' % \
+        (self.ident, self.size, self.flags, self.iencoding, str(self))
+    def __unicode__(self):
+      return Id3V2.decode(self.data[1:], self.iencoding)
+
+  class TlenFrame(TextFrame):
+    """TLEN is a text frame containing a time in ms. Convert to human-readable."""
+    def full_str(self):
+      return u'%s: %s' % (Id3V2.frameName(self.ident), unicode(self))
+    def __unicode__(self):
+      s = Id3V2.decode(self.data[1:], self.iencoding)
+      return hms(s)
+
+  class Tcop(TextFrame):
+    """TCOP is a copyright notice. Spec says to display it accordingly."""
+    def full_str(self):
+      return u'%s: Copyright © %s' % (Id3V2.frameName(self.ident), unicode(self))
+
+  class TxxxFrame(Frame):
+    """Holds a description and value."""
+    def __init__(self):
+      Id3V2.Frame.__init__(self)
+      self.iencoding = 0
+      self.desc_len = 0
+      self.description = None
+    def read(self, ident, size, flags, ifile):
+      Id3V2.Frame.read(self, ident, size, flags, ifile)
+      # Contents:
+      #  <encoding>  1 byte
+      #  <description>  nul-terminated encoded string
+      #  <comment>   encoded string
+      # Comments are matched on language and description.
+      self.iencoding = ord(self.data[0])
+      self.desc_len = bstrlen(self.data[1:], self.iencoding)
+      start = 1
+      end = start + self.desc_len
+      self.description = Id3V2.decode(self.data[start:end], self.iencoding).rstrip(u'\0')
+      return self
+    def set(self, desc, text, iencoding):
+      nul = '\0' if iencoding in (0,3) else '\0\0'
+      self.iencoding = iencoding
+      self.description = desc
+      desc = encode(desc, iencoding) + nul
+      data = chr(iencoding) + desc + encode(text, iencoding)
+      self.desc_len = len(desc)
+      Id3V2.Frame.set(self, "TXXX", len(data), 0, data)
+      return self
+    def __repr__(self):
+      return '<TXXX Frame %s:"%s">' % (self.description, unicode(self))
+    def full_str(self):
+      return u'%s: %s:"%s"' % \
+        (Id3V2.frameName('TXXX'), self.description, unicode(self))
+    def __unicode__(self):
+      return Id3V2.decode(self.data[1+self.desc_len:], self.iencoding)
+    def __eq__(self, other):
+      # For TXXX frames, the description is considered when comparing them.
+      return self.ident == other.ident and \
+          self.description == other.description
+
+  class UrlFrame(TextFrame):
+    def __repr__(self):
+      return '<Url Frame "%s" size=%d flags=%#x, encoding=%d, "%s">' % \
+        (self.ident, self.size, self.flags, self.iencoding, unicode(self))
+
+  class CommFrame(Frame):
+    """Holds a comment."""
+    def __init__(self):
+      Id3V2.Frame.__init__(self)
+      self.iencoding = 0
+      self.language = None
+      self.desc_len = 0
+      self.description = None
+    def read(self, ident, size, flags, ifile):
+      Id3V2.Frame.read(self, ident, size, flags, ifile)
+      # Contents:
+      #  <encoding>  1 byte
+      #  <language>  3 bytes, ISO-639-2, e.g. "eng"
+      #  <description>  nul-terminated encoded string
+      #  <comment>   encoded string
+      # Comments are matched on language and description.
+      data = self.data
+      self.iencoding = iencoding = ord(data[0])
+      self.language = data[1:4]
+      self.desc_len = bstrlen(data[4:], iencoding)
+      start = 4
+      end = start + self.desc_len
+      desc = Id3V2.decode(data[start:end], iencoding).rstrip(u'\0')
+      self.description = Id3V2.decode(data[start:end], iencoding).rstrip(u'\0')
+      return self
+    def set(self, language, description, comment, iencoding):
+      nul = '\0' if iencoding in (0,3) else '\0\0'
+      if len(language) != 3: language = 'eng'
+      data = chr(iencoding) + language + encode(description, iencoding) \
+          + nul + encode(comment, iencoding)
+      self.iencoding = iencoding
+      self.language = language
+      self.desc_len = bstrlen(description, iencoding)
+      self.description = description
+      Id3V2.Frame.set(self, "COMM", len(data), 0, data)
+      return self
+    def __repr__(self):
+      return '<Comment Frame %s:%s:"%s">' % \
+        (self.language, self.description, str(self))
+    def full_str(self):
+      return u'%s: %s:%s:"%s"' % \
+        (Id3V2.frameName('COMM'), self.language, self.description, unicode(self))
+    def __unicode__(self):
+      start = 4 + self.desc_len
+      return Id3V2.decode(self.data[start:], self.iencoding)
+    def __eq__(self, other):
+      # For COMM frames, the language and description are considered
+      # when comparing them.
+      return self.ident == other.ident and \
+          self.language == other.language and \
+          self.description == other.description
+
+  class ApicFrame(Frame):
+    """Holds an embedded picture with text description."""
+    def __init__(self):
+      Id3V2.Frame.__init__(self)
+      self.iencoding = 0
+      self.mime_len = 0
+      self.desc_len = 0
+      self.description = None
+      self.filename = None
+      self.mime_type = None
+    def read(self, ident, size, flags, ifile):
+      Id3V2.Frame.read(self, ident, size, flags, ifile)
+      # Sample data: APIC len=00.02.39.79  flags=00.00
+      # encoding=03  image/jpeg.00  type=03  description=00
+      # data=ff.d8.ff.e0.00.10.JFIF...
+      # Find the starts of the data fields
+      data = self.data
+      self.iencoding = ord(data[0])
+      self.mime_len = bstrlen(data[1:])
+      self.desc_len = bstrlen(data[self.mime_len+2:], self.iencoding)
+      self.filename = None
+      self.mime_type = self.data[1:1+self.mime_len].decode('latin1').rstrip(u'\0')
+      self.picture_type = ord(self.data[1+self.mime_len])
+      start = self.mime_len + 2
+      end = start + self.desc_len
+      self.description = Id3V2.decode(self.data[start:end], self.iencoding).rstrip(u'\0')
+      # TODO: maybe we don't need to keep the image in memory
+      return self
+    def set(self, filename, picture_type, desc, iencoding):
+      # No need to read the file data here; we'll just copy it
+      # from the file later.
+      if not filename: mime_type = 'None'
+      elif filename.lower().endswith('jpg'): mime_type = "jpeg"
+      else: mime_type = os.path.splitext(filename.lower())[1]
+      nul = '\0' if iencoding in (0,3) else '\0\0'
+      picture_type = Id3V2.IMAGE_TYPES.index(picture_type)
+      mime_type = "image/" + mime_type
+      data = chr(iencoding) + mime_type + '\0' + \
+        chr(picture_type) + encode(desc, iencoding) + nul
+      self.iencoding = iencoding
+      self.mime_len = bstrlen(mime_type)
+      self.desc_len = bstrlen(desc, iencoding)
+      self.filename = filename
+      self.mime_type = mime_type
+      self.picture_type = picture_type
+      self.description = desc
+      size = len(data) + os.path.getsize(filename)
+      Id3V2.Frame.set(self, "APIC", size, 0, data)
+      return self
+    def dummy(self, picture_type):
+      """Create a dummy APIC frame to pass to del_frame()"""
+      # No need to read the file data here; we'll just copy it
+      # from the file later.
+      self.ident = 'APIC'
+      self.picture_type = Id3V2.IMAGE_TYPES.index(picture_type)
+      return self
+    def image(self):
+      return data[self.mime_len + self.desc_len + 2:]
+    def write(self, id3, ofile):
+      Id3V2.Frame.write(self, id3, ofile)
+      if self.filename:
+        with open(self.filename, "rb") as ifile:
+          _copy_data(ifile, ofile, os.path.getsize(self.filename))
+    def write_image(self, destdir):
+      ext = self.mime_type.split('/')[1]
+      filename = Id3V2.IMAGE_TYPES[self.picture_type] + '.' + ext
+      filename = os.path.join(destdir, filename)
+      end = self.mime_len + self.desc_len + 2
+      with open(filename, "wb") as ofile:
+        ofile.write(self.data[end:])
+    def __repr__(self):
+      end = self.mime_len + self.desc_len + 2
+      return '<Picture Frame "%s" size=%d "%s">' % \
+        (Id3V2.IMAGE_TYPES[self.picture_type], self.size-end, self.description)
+    def full_str(self):
+      end = self.mime_len + self.desc_len + 2
+      return u'%s: %s, "%s", %d bytes' % \
+        (Id3V2.frameName('APIC'), Id3V2.IMAGE_TYPES[self.picture_type],
+        self.description, self.size-end)
+    def __unicode__(self):
+      if self.description:
+        return u'Picture %s(%s)' % \
+            (Id3V2.IMAGE_TYPES[self.picture_type], self.description)
+      else:
+        return u'Picture %s' % Id3V2.IMAGE_TYPES[self.picture_type]
+    def __eq__(self, other):
+      """For APIC frames, the picture type is considered when comparing them."""
+      return self.ident == other.ident and \
+          self.picture_type == other.picture_type
+
+  @staticmethod
+  def frameName(name):
+    global longform
+    if longform:
+      if name in Id3V2.FRAME_TYPES:
+        return "%s (%s)" % (name, Id3V2.FRAME_TYPES[name])
+      else:
+        return "%s (unknown)" % name
+    else:
+      return name
+
+
+#       MINOR UTILITIES
+#       Mostly dealing with converting things into other things
+
+def int2str(i):
+  """Convert an int to a string. If i == None, return ''."""
+  if i is None: return ""
+  return str(i)
+
+digits_re = re.compile(r'''\d+''')
+
+def digits_only(s):
+  mo = digits_re.search(s)
+  return mo.group() if mo else ''
+
+def str2int(s, dflt=None):
+  """Return int(s), or dflt if not convertible. Trailing non-digits
+  are ignored, e.g. "5/7" would be converted to 5"""
+  mo = digits_re.search(s)
+  if not mo: return dflt
+  return int(mo.group())
+
+def hms(s):
+  """Convert ms to h:m:s.sss"""
+  ms = str2int(s)
+  if not ms: return s
+  s = ms//1000
+  ms %= 1000
+  m = s//60
+  s %= 60
+  h = m//60
+  m %= 60
+  if h: return u"%d:%2.2d:%2.2d.%3.3d" % (h,m,s,ms)
+  if m: return u"%d:%2.2d.%3.3d" % (m,s,ms)
+  return u"%d.%3.3d" % (s,ms)
+
+def bstrlen(data, encoding = 0):
+  """Count bytes until a zero is found, count includes terminator."""
+  l = len(data)
+  if encoding in (0,3):
+    # latin1, utf-8
+    i = data.find('\0')
+    return i+1 if i >= 0 else l
+  else:
+    # utf-16
+    i = 0
+    while i < l-1 and (data[i] != '\0' or data[i+1] != '\0'):
+      i += 2
+    i += 2
+  return i
+
+def encode(s, iencoding):
+  """Similar to s.encode(), but does not throw an error on unencodable
+  latin1 characters."""
+  return s.encode(Id3V2.ENCODINGS[iencoding], 'replace')
+
+def _copy_data(ifile, ofile, n):
+  while n > 0:
+    buf = ifile.read(min(8192,n))
+    ofile.write(buf)
+    n -= len(buf)
+
+
+#       MAIN PROGRAM STARTS HERE
+
+do_id3v1 = True
+do_id3v2 = True
+out_format = None
+
+
+def main():
+  global verbose, shortform, longform, do_id3v1, do_id3v2
+  global id3v2_version, out_format, encoding, iencoding
+
+  write_images = None
+
+  # Get arguments with getopt
+  long_opts = ['help', 'long-help', 'genres', "frame-types",
+      "delete",
+      "add-image=", "remove-image=", "write-images=",
+      "image-types", "encoding=", "2.3", "2.4"]
+
+  # Options that modify the ID3 tags are saved, and executed in order
+  # later.
+  cmds = []
+  try:
+    (optlist, args) = getopt.getopt(sys.argv[1:], 'hHvls12f:a:A:t:c:n:G:Y:T:', long_opts)
+    for flag, value in optlist:
+      if flag in ('-h', '--help'):
+        print usage
+        sys.exit(0)
+      if flag in ('-H', '--long-help'):
+        print usage
+        print long_help
+        sys.exit(0)
+      elif flag == '-v':
+        verbose += 1
+      elif flag == '-l':
+        longform = True
+      elif flag == '-s':
+        shortform = True
+      elif flag == '-f':
+        out_format = value
+      elif flag == '-1':
+        do_id3v1 = True
+        do_id3v2 = False
+      elif flag == '-2':
+        do_id3v1 = False
+        do_id3v2 = True
+      elif flag in ('-a', '-A', '-t', '-c', '-n', '-G', '-Y', '-T',
+          "--add-image", "--remove-image",):
+        cmds.append((flag, value.decode(TERM_ENC)))
+      elif flag == "--delete":
+        cmds.append((flag, None))
+      elif flag == '--write-images':
+        write_images = value
+      elif flag == '--genres':
+        list_genres()
+        return 0
+      elif flag == '--frame-types':
+        list_frame_types()
+        return 0
+      elif flag == '--image-types':
+        list_image_types()
+        return 0
+      elif flag == '--encoding':
+        encoding = value
+        try:
+          iencoding = Id3V2.ENCODINGS.index(encoding)
+        except IndexError:
+          encoding = "utf8"
+          iencoding = 3
+      elif flag == '--2.3':
+        id3v2_version = "2.3"
+      elif flag == '--2.4':
+        id3v2_version = "2.4"
+  except getopt.GetoptError as e:
+    print >>sys.stderr, e
+    sys.exit(2)
+
+  if not args:
+    print >>sys.stderr, "Requires at least one mp3 filename\n"
+    print >>sys.stderr, 'usage:'
+    print >>sys.stderr, usage
+    sys.exit(2)
+
+  if write_images:
+    rval = write_all_images(args[0], write_images)
+  elif cmds:
+    rval = process_files(args, process_commands, cmds)
+  else:
+    rval = process_files(args, dump_id3, None)
+
+  return rval
+
+def process_files(filenames, handler, data):
+  """Apply `handler` to all files. Return the largest
+  return code from any of them. Error 3 or above is immediate
+  return."""
+  rval = 0
+  for filename in filenames:
+    if os.path.isfile(filename):
+      ret = handler(filename, data)
+      if ret >= 3:
+          return ret
+      rval = max(rval, ret)
+    else:
+      print 'File "%s" not found' % filename
+      rval = max(rval, 2)
+  return rval
+
+def dump_id3(filename, mp3info):
+  """Given a filename, dump the Id3 data from that file, if any."""
+  global out_format
+  try:
+    if not mp3info:
+      mp3info = Mp3Info(filename)
+    id3v1 = Id3V1.readFromFile(filename, mp3info) if do_id3v1 else None
+    id3v2 = Id3V2.readFromFile(filename, mp3info) if do_id3v2 else None
+    if id3v1 or id3v2:
+      if out_format:
+        if id3v1: print id3v1.formatted(out_format).encode(TERM_ENC)
+        if id3v2: print id3v2.formatted(out_format).encode(TERM_ENC)
+      else:
+        print "%s:" % filename
+        if id3v1:
+          id3v1.dump()
+        if id3v2:
+          id3v2.dump()
+      return 0
+    else:
+      print "%s: no id3 data" % filename
+      return 1
+  except IOError as e:
+    print >>sys.stderr, e
+    return 3
+
+def process_commands(filename, cmds):
+  """Given a list of commands from the command line, apply them
+  all to this file."""
+  global iencoding, verbose, do_id3v1, do_id3v2
+  mp3info = Mp3Info(filename)
+
+  if do_id3v1:
+    orig_id3v1 = Id3V1.readFromFile(filename, mp3info)
+    id3v1 = process_commands_v1(filename, cmds, orig_id3v1)
+
+  try:
+    if do_id3v2:
+      orig_id3v2 = Id3V2.readFromFile(filename, mp3info)
+      if orig_id3v2: orig_size = orig_id3v2.size
+      id3v2 = process_commands_v2(filename, cmds, orig_id3v2)
+      if id3v2:
+        id3v2.compute_size()
+  except Id3V2.Id3Argument:
+    # Error message has already been printed, nothing to do here
+    # but exit.
+    return 2
+
+  # Now to decide what to do with these.
+  # Programming note: it might be more efficient to combine the v1 and
+  # v2 editing operations, but I don't think it's worth it.
+
+  if do_id3v2:
+    # With luck, we can just overwrite the existing tag. If
+    # we're creating a new tag, deleting an old tag, or the
+    # new tag is too big, then we re-write the file.
+    if not orig_id3v2 and not id3v2:
+      pass
+    elif orig_id3v2 and id3v2 and \
+        orig_size >= id3v2.size and orig_size < id3v2.size + 8192:
+      # Grow the new tag to the same size as the old one.
+      id3v2.set_size(orig_size)
+      with open(filename, "rb+") as ofile:
+        ofile.seek(mp3info.id3v2_offset)
+        id3v2.write(ofile)
+    else:
+      # Any other case, we have to re-write the file
+      tmpfilename = filename + '.new'
+      with open(filename, "rb") as ifile:
+        with open(tmpfilename, "wb") as ofile:
+          if id3v2:
+            # Reserve a little space in the id3v2 tag for later growth
+            id3v2.set_size(id3v2.size + 1024)
+            id3v2.write(ofile)
+          ifile.seek(mp3info.audio_offset)
+          _copy_data(ifile, ofile, mp3info.audio_size)
+          if mp3info.id3v1_size > 0:
+            ifile.seek(mp3info.id3v1_offset)
+            _copy_data(ifile, ofile, mp3info.id3v1_size)
+      os.rename(tmpfilename, filename)
+      # New file, new mp3info
+      if mp3info.id3v1_size > 0:
+        mp3info.id3v1_offset = os.path.getsize(filename) - 128
+
+  if do_id3v1:
+    if orig_id3v1 or id3v1:
+      with open(filename, "ab") as ofile:
+        if orig_id3v1:
+          ofile.truncate(mp3info.id3v1_offset)
+          ofile.seek(mp3info.id3v1_offset)
+        if id3v1:
+          id3v1.write(ofile)
+
+  return 0
+
+def process_commands_v1(filename, cmds, id3v1):
+  """Execute all the commands in the list and return the
+  id3v1 tag that results."""
+  for cmd,value in cmds:
+    if cmd != '--delete' and not id3v1:
+      id3v1 = Id3V1()
+    if cmd == '-a':
+      id3v1.artist = value
+    elif cmd == '-A':
+      id3v1.album = value
+    elif cmd == '-t':
+      id3v1.title = value
+    elif cmd == '-c':
+      lang, desc, comment = _parse_comment(value)
+      id3v1.comment = comment
+    elif cmd == '-n':
+      id3v1.track = digits_only(value)[:3]
+    elif cmd == '-G':
+      id3v1.genre = str2int(value, 0)
+    elif cmd == '-Y':
+      id3v1.year = digits_only(value)[:4]
+    elif cmd == '--delete':
+      id3v1 = None
+  return id3v1
+
+def process_commands_v2(filename, cmds, id3v2):
+  """Execute all the commands in the list and return the
+  id3v2 tag that results."""
+  for cmd,value in cmds:
+    if cmd != '--delete' and not id3v2:
+      id3v2 = Id3V2(int(id3v2_version[2]))
+    if cmd == '-a':
+      id3v2.artist = value
+      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TPE1", value, iencoding), value)
+    elif cmd == '-A':
+      id3v2.album = value
+      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TALB", value, iencoding), value)
+    elif cmd == '-t':
+      id3v2.title = value
+      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TIT2", value, iencoding), value)
+    elif cmd == '-n':
+      id3v2.track = digits_only(value)[:3]
+      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TRCK", value, iencoding), value)
+    elif cmd == '-G':
+      id3v2.genre = str2int(value, 0)
+      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TCON", value, iencoding), value)
+    elif cmd == '-Y':
+      id3v1.year = digits_only(value)[:4]
+      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TYER", value, iencoding), value)
+    elif cmd == '-c':
+      lang, desc, comment = _parse_comment(value)
+      if not id3v2.comment or not desc: id3v2.comment = comment
+      id3v2.add_or_del_frame(Id3V2.CommFrame().set(lang, desc, comment, iencoding), comment)
+    elif cmd == '-T':
+      fields = value.split(':')
+      if fields and fields[0] == 'TXXX':
+        if len(fields) < 3:
+          print >>sys.stderr, "-T TXXX option requires <ident>:<desc>:<string>"
+          print >>sys.stderr, "Use --help for command line options"
+          raise Id3V2.Id3Argument("Invalid arguments")
+        ident = str(fields[0])
+        desc = fields[1]
+        text = fields[2]
+        id3v2.add_or_del_frame(Id3V2.TxxxFrame().set(desc, text, iencoding), text)
+      else:
+        if len(fields) < 2:
+          print >>sys.stderr, "-T option requires <ident>:<string>"
+          print >>sys.stderr, "Use --help for command line options"
+          raise Id3V2.Id3Argument("Invalid arguments")
+        ident = str(fields[0])
+        text = fields[1]
+        if len(ident) != 4 or ident[0] != 'T':
+          print >>sys.stderr, \
+              "-T option %s invalid; must start with 'T' and be exactly 4 characters long" % ident
+          print >>sys.stderr, "Use --help for command line options"
+          raise Id3V2.Id3Argument("Invalid arguments")
+        id3v2.add_or_del_frame(Id3V2.TextFrame().set(ident, text, iencoding), text)
+    elif cmd == "--add-image":
+      fields = value.split(':')
+      if len(fields) < 2:
+        print >>sys.stderr, "--add-image option requires <image>:<type>"
+        print >>sys.stderr, "Use --help for command line options"
+        raise Id3V2.Id3Argument("Invalid arguments")
+      filename = fields[0]
+      picture_type = fields[1]
+      desc = fields[2] if len(fields) >= 3 else ''
+      if picture_type not in Id3V2.IMAGE_TYPES:
+        print >>sys.stderr, 'Picture type "%s" not recognized' % picture_type
+        print >>sys.stderr, "Use --image-types for list of valid types"
+        raise Id3V2.Id3Argument("Invalid arguments")
+      if not os.path.isfile(filename):
+        print >>sys.stderr, 'Image file "%s" not found' % filename
+        raise Id3V2.Id3Argument("File %s not found" % filename)
+      frame = Id3V2.ApicFrame().set(filename, picture_type, desc, iencoding)
+      id3v2.add_frame(frame)
+    elif cmd == "--remove-image":
+      if value not in Id3V2.IMAGE_TYPES:
+        print >>sys.stderr, 'Picture type "%s" not recognized' % value
+        print >>sys.stderr, "Use --image-types for list of valid types"
+        raise Id3V2.Id3Argument("Invalid arguments")
+      frame = Id3V2.ApicFrame().dummy(value)
+      id3v2.del_frame(frame)
+    elif cmd == "--delete":
+      id3v2 = None
+#  if verbose:
+#    dump_id3(filename, None)
+  return id3v2
+
+def write_all_images(filename, destdir):
+  if not os.path.isdir(destdir):
+    print >>sys.stderr, "--write-images requires directory."
+    return 2
+  mp3info = Mp3Info(filename)
+  id3v2 = Id3V2.readFromFile(filename, mp3info)
+  for frame in id3v2.frames:
+    if frame.ident == 'APIC':
+      frame.write_image(destdir)
+  return 0
+
+def _parse_comment(value):
+  args = value.split(':')
+  lang = args[-3][:3] if len(args) >= 3 else 'eng'
+  desc = args[-2] if len(args) >= 2 else ''
+  comment = args[-1]
+  return lang, desc, comment
+
+def list_genres():
+  genres = Id3.GENRES.keys()
+  genres.sort()
+  for genre in genres:
+    print "%3d  %s" % (genre, Id3.GENRES[genre])
+
+def list_frame_types():
+  ftypes = Id3V2.FRAME_TYPES.keys()
+  ftypes.sort()
+  for ftype in ftypes:
+    print "%4s  %s" % (ftype, Id3V2.FRAME_TYPES[ftype])
+
+def list_image_types():
+    for itype in Id3V2.IMAGE_TYPES:
+      print itype
+
+if __name__ == '__main__':
+  signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+  try:
+    sys.exit(main())
+  except KeyboardInterrupt as e:
+    print
+    sys.exit(1)
