@@ -11,6 +11,7 @@
 #include <err.h>
 
 #include "libwav.h"
+#include "libid3.h"
 
 /* Inline functions and macros */
 
@@ -68,9 +69,9 @@ static Chunk *readData(FILE *, uint32_t offset, const char *, ChunkType *, uint3
 static Chunk *readCues(FILE *, uint32_t offset, const char *, ChunkType *, uint32_t);
 static Chunk *readLabl(FILE *, uint32_t offset, const char *, ChunkType *, uint32_t);
 static Chunk *readLtxt(FILE *, uint32_t offset, const char *, ChunkType *, uint32_t);
-static Chunk *readId3(FILE *, uint32_t offset, const char *, ChunkType *, uint32_t);
 #endif
 static Chunk *readText(FILE *, uint32_t offset, const char *, ChunkType *, uint32_t);
+static Chunk *readId3(FILE *, uint32_t offset, const char *, ChunkType *, uint32_t);
 //static Chunk *readInt16(FILE *, uint32_t offset, const char *, ChunkType *, uint32_t);
 static Chunk *readInt32(FILE *, uint32_t offset, const char *, ChunkType *, uint32_t);
 
@@ -83,9 +84,9 @@ static void writeData(Chunk *, FILE *src, FILE *dst, uint32_t *offset);
 static void writeCues(Chunk *, FILE *src, FILE *dst, uint32_t *offset);
 static void writeLabl(Chunk *, FILE *src, FILE *dst, uint32_t *offset);
 static void writeLtxt(Chunk *, FILE *src, FILE *dst, uint32_t *offset);
-static void writeId3(Chunk *, FILE *src, FILE *dst, uint32_t *offset);
 #endif
 static void writeText(Chunk *, FILE *src, FILE *dst, uint32_t *offset);
+static void writeId3(Chunk *, FILE *src, FILE *dst, uint32_t *offset);
 //static void writeInt16(Chunk *, FILE *src, FILE *dst, uint32_t *offset);
 static void writeInt32(Chunk *, FILE *src, FILE *dst, uint32_t *offset);
 
@@ -179,8 +180,8 @@ static ChunkType chunkTypes[] = {
     {"labl", "Label", readLabl, writeLabl},
     {"note", "Note", readLabl, writeLabl},
     {"ltxt", "?", readLtxt, writeLtxt},
-    {"id3 ", "ID3 data", readId3, writeId3},
 #endif
+    {"id3 ", "ID3 data", readId3, writeId3},
 };
 
 static Chunk *
@@ -338,13 +339,26 @@ readLtxt(FILE *ifile, uint32_t offset, const char *tag, ChunkType *chunkType, ui
 {
     return NULL;
 }
+#endif
 
 static Chunk *
 readId3(FILE *ifile, uint32_t offset, const char *tag, ChunkType *chunkType, uint32_t chunkLen)
 {
-    return NULL;
+    Chunk *chunk = NULL;
+    Id3v2Chunk *ic;
+    uint8_t *buffer = NULL;
+
+    if ((chunk = newChunk(tag, chunkLen, offset, sizeof(*chunk))) == NULL) {
+	goto exit;
+    }
+    ic = (Id3v2Chunk *)chunk;
+
+    ic->id3v2 = ReadId3V2(ifile, offset+8);
+
+exit:
+    free(buffer);
+    return chunk;
 }
-#endif
 
 /**
  * Read a text that contains a single string
@@ -586,12 +600,29 @@ static void
 writeLtxt(Chunk *chunk, FILE *src, FILE *dst, uint32_t *offset)
 {
 }
+#endif
 
+/**
+ * Write an "id3 " chunk to the file. Write the 8-bye header
+ * here, let libid3 write the rest.
+ */
 static void
 writeId3(Chunk *chunk, FILE *src, FILE *dst, uint32_t *offset)
 {
+    Id3v2Chunk *ic = (Id3v2Chunk *)chunk;
+    char buffer[8];
+    int l;
+    static uint8_t pad = 0;
+
+    memcpy(buffer, chunk->identifier, 4);
+    writeUInt32(buffer+4, chunk->length);
+    fwrite(buffer, 1, sizeof(buffer), dst);
+
+    l = WriteId3V2(src, dst, ic->id3v2);
+    for (; l < chunk->length; ++l) {
+	fwrite(&pad, 1, 1, dst);
+    }
 }
-#endif
 
 static void
 writeText(Chunk *chunk, FILE *src, FILE *dst, uint32_t *offset)
@@ -633,6 +664,10 @@ writeInt32(Chunk *chunk, FILE *src, FILE *dst, uint32_t *offset)
 
 /**
  * Allocate the space for a chunk, and initialize the header
+ * @param tag     chunk tag, 4 characters
+ * @param length  Number of data bytes after the header
+ * @param offset  File offset of the data, if applicable
+ * @param size    Amount of space to allocate for this chunk
  */
 Chunk *
 newChunk(const char *tag, uint32_t length, uint32_t offset, size_t size)

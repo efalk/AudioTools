@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdint.h>
 
+#include "libid3.h"
+
 typedef struct chunk {
   char identifier[4];	/* e.g. "RIFF" for the top level */
   uint32_t length;	/* Length of the data that follows */
@@ -125,6 +127,11 @@ typedef struct text_chunk IshpChunk;	/* Sharpness */
 typedef struct text_chunk IsrcChunk;	/* Source */
 typedef struct text_chunk IsrfChunk;	/* Source Form */
 typedef struct text_chunk ItchChunk;	/* Technician */
+
+typedef struct id3_chunk {
+  Chunk header;
+  Id3V2 *id3v2;
+} Id3v2Chunk;
 
 #ifdef	__cplusplus
 extern	"C"
