@@ -7,6 +7,9 @@ Usage:	id3 [options] file.mp3 ...
 
 Options:
 
+    With no editing options (below), dumps the id3 tag(s)
+    and exits.
+
     Output controls:
 
 	-h --help      short help
@@ -15,6 +18,7 @@ Options:
 	-v	verbose
 	-s	short form
 	-l	long form output
+	-j	json output
 	-1	only deal with Id3v1
 	-2	only deal with Id3v2
 
@@ -43,15 +47,17 @@ Options:
 	-T fid:str	Set arbitrary text frame, see --frame-types for list
 	-T fid:		Delete text frame
 
-	-T TXXX:desc:str    Set TXXX frame. These are text frames with a description
-	-T TXXX:desc:	    Delete TXXX frame.
+	-T TXXX:descr:str	Set TXXX frame.
+	-T TXXX:desc:		Delete TXXX frame.
 
-	--delete	delete Id3 tag(s)
+	--from-json file	Read tags from json file.
+	--delete		delete Id3 tag(s)
 
 	--add-image file:TYPE[:description]	Add a picture.
 	--remove-image TYPE			Remove a picture
 
 	--encoding latin1|utf8|utf16|utf16-be	Set encoding (default utf8)
+	--2.2					Write Id3v2.2 tag
 	--2.3					Write Id3v2.3 tag
 	--2.4					Write Id3v2.4 tag (default)
 """
@@ -80,8 +86,8 @@ long_help = """
 	an id3v1 tag, or if you've selected "--encoding latin1".
 	Unencodable characters will quietly be replaced with '?'.
 
-	The --2.3 and --2.4 flags are ignored if there is already an
-	existing Id3v2 tag, in which case that's the version used.
+	The --2.x flags are ignored if there is already an existing
+	Id3v2 tag.
 
 	Editing options are processed in order. For example,
 	    --remove -a "Annie Lennox" -t "Sisters"
@@ -90,6 +96,80 @@ long_help = """
 	Where possible, this tool over-writes the existing tags in place.
 	Otherwise, it will re-write the entire .mp3 file, which may take
 	longer and requires the use of a temporary file.
+
+Json:
+
+	The -j option writes a json file to stdout. Normally, it
+	generates an array of output as shown in the first example
+	below. If the -s (short) option is also given, then it
+	generates the third form, and only for the first file on
+	the command line.
+
+	On input, the --from-json option can accept several formats:
+
+	1: An array of id3 info blocks and filenames:
+
+	  [
+	    {"filename": "_path_",
+	     "id3v1": {_id3_block_},
+	     "id3v2": {_id3_block_},
+	    },
+	    ...
+	  ]
+
+
+	2: A single id3 info block with a filename:
+
+	  {"filename": "_path_",
+	   "id3v1": {_id3_block_},
+	   "id3v2": {_id3_block_},
+	  }
+
+
+	3: A single id3 info block with no filename. This information will
+	   be applied to every file listed on the command line:
+
+	  {"id3v1": {_id3_block_},
+	   "id3v2": {_id3_block_},
+	  }
+
+
+	4: A block of key/value pairs which will be applied to both id3 tags
+	   on every file listed on the command line:
+
+	  {_id3_block_}
+
+	The first two forms don't require any filenames on the command line.
+	The first form lets you modify multiple files. This is the format
+	emitted with the "-j" option.
+
+	The second two forms require file name(s) on the command line and
+	are applied equally to all files.
+
+
+	An _id3 block_ may consist of the following keys:
+
+	  "title"	string (TIT2)
+	  "artist"	string (TPE1)
+	  "album"	string (TALB)
+	  "comment"	string (COMM)
+	  "year"	string, 4 characters (TYER)
+	  "track"	number (TRCK)
+	  "genre"	number, use --genres for a list (TCON)
+
+	  "Tttt"	string, use --frame-types for a list
+	  "TXXX"	{"description":DESC, "value":STRING}
+	  "Wwww"	url string, use --frame-types for a list
+	  "COMM"	{"lang":LANG¹, "description":DESC, "value":STRING}
+	  "APIC"	{"type":TYPE², "description":DESC, "file":PATH}
+
+	  If Id3V2 version is 2.2, the keys are the 3-character equivalents.
+
+	  All strings are encoded utf-8 in json files.
+
+	  ¹ Language is ISO-639-2, e.g. "eng"
+	  ² Use --image-types for a list of image types.
+
 
 Exit codes:
 
@@ -100,12 +180,12 @@ Exit codes:
 
 Bugs and issues:
 
-	Id3v2.3 and Id3v2.4 define different sets of frames. This app
-	doesn't care and supports any kind of frame on any version of Id3v2.
-	In fact, and frame whose ident starts with 'T' is accepted as a
-	text frame.
+	Id3v2.2, Id3v2.3, and Id3v2.4 define different sets of
+	frames. This app doesn't care and supports any kind of frame
+	on any version of Id3v2.  For example, any frame whose ident
+	starts with 'T' is accepted as a text frame.
 
-	Doest not support Id3v2 earlier than 2.3
+	Does not support Id3v2 earlier than 2.2
 
 	Id3v2.4 allows text frames to have multiple strings. This app
 	does not support this.
@@ -115,6 +195,13 @@ Bugs and issues:
 	when modifying a frame, only modifies the first instance of
 	a frame. Likewise, only the first instance of a frame will
 	be displayed when using a custom format.
+
+	Many frame types, such as "Synchronized tempo codes",
+	"Popularimeter", and so forth are not supported. If their size
+	is reasonably small (or -l is specified), they can be dumped
+	to json in base64 format. If you need support for any of
+	these, contact the author; they shouldn't be too hard to
+	add.
 """
 
 # Programming note: most strings are stored internally as unicode (the
@@ -130,15 +217,18 @@ import signal
 import getopt
 import re
 import struct
+import json
+import locale
+import codecs
 
 verbose = 0
 shortform = False
 longform = False
 encoding = 'utf-8'
 iencoding = 3
-id3v2_version = "2.4"
+id3v2_version = "2.3"
 
-TERM_ENC = 'utf-8'      # Terminal encoding. TODO: get from environment.
+TERM_ENC = 'UTF-8'      # Terminal encoding.
 
 class Mp3Info(object):
   """Info about the MP3 file that holds these ID3 tags."""
@@ -203,16 +293,16 @@ class Mp3Info(object):
 class Id3(object):
   """Abstract superclass to V1 and V2"""
   def __init__(self):
-    self.filename = None
-    self.version = u""
-    self.title = u""
-    self.artist = u""
-    self.album = u""
-    self.year = u""
-    self.comment = u""
-    self.genre = 0
-    self.track = u""
-    self.total_size = 0
+    self.filename = None    # string or None
+    self.version = u""      # string, e.g. "2.3"
+    self.title = u""        # string
+    self.artist = u""       # string
+    self.album = u""        # string
+    self.year = u""         # string
+    self.comment = u""      # string
+    self.genre = 0          # int
+    self.track = 0          # int
+    self.total_size = 0     # total size of this tag
   def read(self, ifile, offset):
     return False        # subclass this
 
@@ -220,7 +310,7 @@ class Id3(object):
     global shortform, longform
     if shortform:
       print (u" id3v%-4s  %4s  %-30s  %-30s  %-30s  %4s" % (self.version,
-        int2str(self.track), self.artist,
+        "" if self.track == 0 else str(self.track), self.artist,
         self.title, self.album, self.year)).encode(TERM_ENC)
     else:
       print " id3v%s data:" % self.version
@@ -236,8 +326,8 @@ class Id3(object):
     return Id3.GENRES.get(self.genre, "unknown")
 
   def __repr__(self):
-    if self.track is not None:
-      rval = '<id3v%s: %s, %s, %s, %s, T%s, G%d>' % \
+    if self.track > 0:
+      rval = '<id3v%s: %s, %s, %s, %s, T%d, G%d>' % \
         (self.version, self.artist, self.album, self.title,
                 self.year, self.track, self.genre)
     else:
@@ -248,7 +338,7 @@ class Id3(object):
 
   format_scanner = re.Scanner([
     (r'''\\.''', lambda s,t: t),
-    (r'''%[%A-Za-z\d]+''', lambda s,t: t),
+    (r'''%[%A-Za-z]+''', lambda s,t: t),
     (r'''[^%]+''', lambda s,t: t),
   ])
 
@@ -362,7 +452,7 @@ class Id3V1(Id3):
     comment = buf[97:127]
     # Look for v1.1
     if comment[28] == '\0' and comment[29] != '\0':
-      self.track = unicode(ord(comment[29]))
+      self.track = ord(comment[29])
       comment = comment[0:28]
       self.version = "1.1"
     self.comment = comment.decode('latin1').rstrip('\0')
@@ -374,59 +464,75 @@ class Id3V1(Id3):
     album = self.album.encode('latin1', 'replace')[:30].ljust(30,'\0')
     year = self.year.encode('latin1', 'replace')[:4].ljust(4,'\0')
     comment = self.comment.encode('latin1', 'replace')[:28].ljust(28,'\0')
-    trk = str2int(self.track, 0)
     buf = struct.pack("3s30s30s30s4s28sBBB", "TAG",
-        title, artist, album, year, comment, 0, str2int(self.track, 0), self.genre)
+        title, artist, album, year, comment, 0, self.track, self.genre)
     ofile.write(buf)
 
+  def to_json(self):
+    """Return the _id3 block_ for this tag."""
+    rval = {}
+    if self.title: rval["title"] = self.title
+    if self.artist: rval["artist"] = self.artist
+    if self.album: rval["album"] = self.album
+    if self.comment: rval["comment"] = self.comment
+    if self.year: rval["year"] = self.year
+    if self.track: rval["track"] = self.track
+    if self.genre: rval["genre"] = self.genre
+    return rval
+
+
 class Id3V2(Id3):
+  """Superclass to all Id3V2 classes."""
   # Id3v2 flags
   F_UNSYNC = 0x80
+  F_COMPRESSION = 0x40  # 2.2 only
   F_EXTHDR = 0x40
   F_EXPERIMENTAL = 0x20
   F_FOOTER = 0x10       # 2.4 and above only
-  # Id3v2.3 frame flags
-  FF3_TAG_ALTER = 0x8000
-  FF3_FILE_ALTER = 0x4000
-  FF3_READ_ONLY = 0x2000
-  FF3_COMPRESSION = 0x0080
-  FF3_ENCRYPTION = 0x0040
-  FF3_GROUP = 0x0020
-  # Id3v2.4 frame flags
-  FF4_TAG_ALTER = 0x4000
-  FF4_FILE_ALTER = 0x2000
-  FF4_READ_ONLY = 0x1000
-  FF4_GROUP = 0x0040
-  FF4_COMPRESSION = 0x0008
-  FF4_ENCRYPTION = 0x0004
-  FF4_UNSYNC = 0x0002
-  FF4_DATA_LEN = 0x0001
 
   @classmethod
   def readFromFile(cls, filename, mp3info):
     """Given a file, read the Id3v2 tag from it, if any."""
     if mp3info.id3v2_size == 0: return None
+    # All Id3V2 tags start with a 10-byte header. Read that
+    # to determine the actual tag version.
     with open(filename, "rb") as ifile:
-      id3v2 = Id3V2()
+      ifile.seek(mp3info.id3v2_offset)
+      head = ifile.read(10)
+      major = ord(head[3])
+      if major == 2: cls = Id3V22
+      elif major == 3: cls = Id3V23
+      elif major == 4: cls = Id3V24
+      else:
+        raise Id3V2.Id3Error("Id3 version 2.%d not supported" % major)
+      id3v2 = cls(major)
       if id3v2.read(ifile, mp3info.id3v2_offset):
         id3v2.filename = filename
         return id3v2
       else:
         return None
 
+  @staticmethod
+  def new(major):
+    if major == 2: return Id3V22(major)
+    elif major == 3: return Id3V23(major)
+    elif major == 4: return Id3V24(major)
+    else: raise Id3V2.Id3Error("Id3 version 2.%d not supported" % major)
+
   def __init__(self, major=3):
     Id3.__init__(self)
     self.frames = []
-    self.version = "2"
+    self.version = "2.%d" % major
     self.major_version = major
     self.ext_header = None
     self.flags = 0
     self.size = 0               # Size of tag, not counting headers
     self.content_size = 0       # Size of actual content, including ext_header
                                 # but not including header, padding, or footer
-    self.total_size = 10        # Size of tag, including headers
+    self.frame_header_size = 0
 
   def read(self, ifile, offset):
+    """Read Id3V2 tag from file."""
     global verbose
     ifile.seek(offset)
     head = ifile.read(10)
@@ -435,17 +541,13 @@ class Id3V2(Id3):
     size = Id3V2.syncsafe(size)
     self.version = "2.%d" % major
     self.major_version = major
-    if self.major_version < 3:
-      print >>sys.stderr, "Id3v2.%d version not supported" % \
-          self.major_version
-      return False
     self.flags = flags
     self.content_size = 0
     self.size = size
     self.total_size = 10 + self.size
     if self.flags & Id3V2.F_FOOTER: self.total_size += 10
     rem = self.size
-    if self.flags & Id3V2.F_EXTHDR:
+    if major >= 3 and self.flags & Id3V2.F_EXTHDR:
       # There's an extended header present. There's nothing
       # there we actually need. I've never heard of an app that
       # even uses it.
@@ -462,6 +564,7 @@ class Id3V2(Id3):
     return True
 
   def write(self, ofile):
+    """Write Id3V2 tag to file."""
     global verbose
     maj = self.major_version
     buf = struct.pack(">3sbbbI",
@@ -470,12 +573,20 @@ class Id3V2(Id3):
     if self.ext_header:
       self.ext_header.write(self, ofile)
     for frame in self.frames:
-      frame.write(self, ofile)
+      self.write_frame(frame, ofile)
     if self.size > self.content_size:
       padding = self.size - self.content_size
       ofile.write('\0'*padding)
     if self.flags & Id3V2.F_FOOTER:
       ofile.write(buf)
+
+  def to_json(self):
+    """Return the _id3 block_ for this tag."""
+    rval = {}
+    for frame in self.frames:
+      k,v = frame.to_json()
+      rval[k] = v
+    return rval
 
   def add_frame(self, frame):
     try:
@@ -498,77 +609,67 @@ class Id3V2(Id3):
     if value: self.add_frame(frame)
     else: self.del_frame(frame)
 
+  def read_frame_header(self, ifile):
+    # Must be subclassed
+    return (None, 0,0)
+
   def read_frame(self, ifile):
-    maj = self.major_version
-    head = ifile.read(10)
-    if head[0] == '\0': return None
-    #print "header:", [c for c in head]
-    ident, size, flags = struct.unpack(">4sIH", head)
-    # There may be extra data in the frame. For now, read
-    # and discard it.
-    if maj == 3:
-      if flags & Id3V2.FF3_COMPRESSION:
-        decompressed_size = ifile.read(4)
-        size -= 4
-      if flags & Id3V2.FF3_ENCRYPTION:
-        encryption_method = ifile.read(1)
-        size -= 1
-      if flags & Id3V2.FF3_GROUP:
-        group = ifile.read(1)
-        size -= 1
-    elif maj == 4:
-      size = Id3V2.syncsafe(size)
-      if flags & Id3V2.FF4_GROUP:
-        group = ifile.read(1)
-        size -= 1
-      if flags & Id3V2.FF4_ENCRYPTION:
-        encryption_method = ifile.read(1)
-        size -= 1
-      if flags & Id3V2.FF4_DATA_LEN:
-        decompressed_size = ifile.read(4)
-        size -= 4
-    if ident == 'TLEN':
-      return Id3V2.TlenFrame().read(ident, size, flags, ifile)
-    elif ident == 'TCOP':
-      return Id3V2.TcopFrame().read(ident, size, flags, ifile)
-    elif ident == 'TXXX':
-      return Id3V2.TxxxFrame().read(ident, size, flags, ifile)
+    ident, size, flags = self.read_frame_header(ifile)
+    if ident == None: return None
+    if ident in FRAME_CLASSES:
+      frame = FRAME_CLASSES[ident](self).read(ident, size, flags, ifile)
     elif ident[0] == 'T':
-      frame = Id3V2.TextFrame().read(ident, size, flags, ifile)
-      # Look for a few standard fields
-      if ident == "TALB": self.album = unicode(frame)
-      elif ident == "TIT2": self.title = unicode(frame)
-      elif ident == "TPE1": self.artist = unicode(frame)
-      elif ident == "TYER": self.year = unicode(frame)
-      elif ident == 'TRCK': self.track = unicode(frame)
-      elif ident == 'TCON': self.genre = str2int(str(frame), 0)
-      elif ident in ("TDRC", "TDRL", "TDEN", "TDOR", "TDTG", "TORY") and not self.year:
-        self.year = unicode(frame)[:4]
-      return frame
-    elif ident == 'COMM':
-      frame = Id3V2.CommFrame().read(ident, size, flags, ifile)
-      self.comment = unicode(frame)
-      return frame
+      frame = Id3V2.TextFrame(self).read(ident, size, flags, ifile)
     elif ident[0] == 'W':
-      return Id3V2.UrlFrame().read(ident, size, flags, ifile)
-    elif ident == 'APIC':
-      return Id3V2.ApicFrame().read(ident, size, flags, ifile)
+      frame = Id3V2.UrlFrame(self).read(ident, size, flags, ifile)
     else:
-      return Id3V2.Frame().read(ident, size, flags, ifile)
+      frame = Id3V2.Frame(self).read(ident, size, flags, ifile)
+
+      # Look for a few standard fields
+    if ident in ('COMM', 'COM'):
+      if not self.comment or not frame.description:
+        self.comment = unicode(frame)
+    elif ident[0] == 'T':
+      if ident in ("TALB", 'TAL'): self.album = unicode(frame)
+      elif ident in ("TIT2", 'TT2'): self.title = unicode(frame)
+      elif ident in ("TPE1", 'TP1'): self.artist = unicode(frame)
+      elif ident in ("TYER", 'TYE'): self.year = unicode(frame)
+      elif ident in ('TRCK', 'TRK'): self.track = str2int(str(frame), 0)
+      elif ident in ('TCON', 'TCO'): self.genre = str2int(str(frame), 0)
+      elif ident in ("TDRC", "TDRL", "TDEN", "TDOR", "TDTG", "TORY") \
+          and not self.year:
+        self.year = unicode(frame)[:4]
+
+    return frame
+
+  def write_frame_header(self, frame, ofile):
+    # Must be subclassed
+    pass
+
+  def write_frame(self, frame, ofile):
+    self.write_frame_header(frame, ofile)
+    frame.write(ofile)
 
   def append(self, frame):
     self.frames.append(frame)
 
   def set_size(self, size):
     """Set the size of the tag, not including header."""
+    header_size = 10
     if size < self.content_size:
       raise Id3V2.Id3Error("Attempt to set id3v2 tag size too small")
     self.size = size
-    self.total_size = 10 + size
-    if self.flags & Id3V2.F_FOOTER: self.total_size += 10
+    self.total_size = header_size + size
+    if self.flags & Id3V2.F_FOOTER: self.total_size += header_size
+
+  def set_total_size(self, size):
+    """Set the size of the tag, including header."""
+    header_size = 10
+    self.set_size(size - header_size)
 
   def compute_size(self):
     """Determine how much size this tag will require."""
+    header_size = 10
     size = 0
     if self.ext_header:
       size += self.ext_header.total_size
@@ -576,8 +677,8 @@ class Id3V2(Id3):
       size += frame.total_size
     self.size = size
     self.content_size = size
-    self.total_size = 10 + self.size
-    if self.flags & Id3V2.F_FOOTER: self.total_size += 10
+    self.total_size = header_size + self.size
+    if self.flags & Id3V2.F_FOOTER: self.total_size += header_size
 
   def dump(self):
     global shortform, longform
@@ -613,7 +714,6 @@ class Id3V2(Id3):
     buf = [i>>21 & 0x7f, i>>14 & 0x7f, i>>7 & 0x7f, i & 0x7f]
     return reduce(lambda a,b: a<<8|b, [b for b in buf])
 
-
   @staticmethod
   def readBytes(buf):
     return reduce(lambda a,b: a<<8|b, [ord(c) for c in buf])
@@ -630,6 +730,73 @@ class Id3V2(Id3):
     "COMPOSER", "LYRICIST", "RECORDING_LOCATION", "DURING_RECORDING",
     "DURING_PERFORMANCE", "VIDEO", "BRIGHT_COLORED_FISH", "ILLUSTRATION",
     "BAND_LOGO", "PUBLISHER_LOGO",)
+
+
+  FRAME_TYPES_2 = {
+    "UFI": "Unique file identifier",
+    "TT1": 'Content group description',
+    "TT2": 'Title/Songname/Content description',
+    "TT3": 'Subtitle/Description refinement',
+    "TP1": 'Lead artist(s)/Lead performer(s)/Soloist(s)/Performing group',
+    "TP2": 'Band/Orchestra/Accompaniment',
+    "TP3": 'Conductor',
+    "TP4": 'Interpreted, remixed, or otherwise modified by',
+    "TCM": 'Composer(s)',
+    "TXT": 'Lyricist(s)/text writer(s)',
+    "TLA": 'Language(s)',
+    "TCO": 'Content type',
+    "TAL": 'Album/Movie/Show title',
+    "TPA": 'Part of a set',
+    "TRK": 'Track number/Position in set',
+    "TRC": 'ISRC',
+    "TYE": 'Year',
+    "TDA": 'Date',
+    "TIM": 'Time',
+    "TRD": 'Recording dates',
+    "TMT": 'Media type',
+    "TFT": 'File type',
+    "TBP": 'beats per minute',
+    "TCR": 'Copyright message',
+    "TPB": 'Publisher',
+    "TEN": 'Encoded by',
+    "TSS": 'Software/hardware and settings used for encoding',
+    "TOF": 'Original filename',
+    "TLE": 'Length',
+    "TSI": 'Size',
+    "TDY": 'Playlist delay',
+    "TKE": 'Initial key',
+    "TOT": 'Original album/Movie/Show title',
+    "TOA": 'Original artist(s)/performer(s)',
+    "TOL": 'Original Lyricist(s)/text writer(s)',
+    "TOR": 'Original release year',
+    "TXX": 'User defined text information frame',
+    "WAF": 'Official audio file webpage',
+    "WAR": 'Official artist/performer webpage',
+    "WAS": 'Official audio source webpage',
+    "WCM": 'Commercial information',
+    "WCP": 'Copyright/Legal information',
+    "WPB": 'Publishers official webpage',
+    "WXX": 'User defined URL link frame',
+    "IPL": "Involved people list",
+    "MCI": "Music CD identifier",
+    "ETC": "Event timing codes",
+    "MLL": "Location lookup table",
+    "STC": "Synced tempo codes",
+    "ULT": "Unsynced lyrics/text",
+    "SLT": "Synced lyrics/text",
+    "COM": "Comment",
+    "RVA": "Relative volume adjustment",
+    "EQU": "Equalisation",
+    "REV": "Reverb settings",
+    "PIC": "Attached picture",
+    "GEO": "General encapsulated object",
+    "CNT": "Play counter",
+    "POP": "Popularimeter",
+    "BUF": "Recommended buffer size",
+    "CRM": "Encrypted meta frame",
+    "CRA": "Audio encryption",
+    "LNK": "Linked information",
+  }
 
   FRAME_TYPES = {
     "AENC": "Audio encryption",
@@ -754,49 +921,56 @@ class Id3V2(Id3):
         self.total_size = 4 + self.size
       # Someday we may want to parse the actual extended header data.
       # Today is not that day.
-    def write(self, id3v2, ofile):
+    def write(self, ofile):
       ofile.write(self.header)
       ofile.write(self.data)
 
 
   class Frame(object):
     """Generic Id3v2 frame object, and superclass to all frames."""
-    def __init__(self):
+    def __init__(self, id3v2):
       """Create empty frame object."""
+      header_size = id3v2.frame_header_size
+      self.id3v2 = id3v2
       self.ident = None
       self.size = 0
       self.flags = 0
-      self.data = None
-      self.total_size = 10 + self.size
+      self.data = ''
+      self.total_size = header_size + self.size
     def read(self, ident, size, flags, ifile):
       """Set header info and read data from file."""
+      header_size = self.id3v2.frame_header_size
       self.ident = ident
       self.size = size
       self.flags = flags
       if ifile:
         self.data = ifile.read(size)
-      self.total_size = 10 + size
+      self.total_size = header_size + size
       return self
     def set(self, ident, size, flags, data):
       """Set header info and data."""
+      header_size = self.id3v2.frame_header_size
       self.ident = ident
       self.size = size
       self.flags = flags
       self.data = data
-      self.total_size = 10 + size
+      self.total_size = header_size + size
       return self
-    def write(self, id3, ofile):
+    def write(self, ofile):
       """Write frame to file."""
       global verbose
-      maj = id3.major_version
-      size = self.size
-      if maj >= 4: size = Id3V2.int2syncsafe(size)
-      buf = struct.pack(">4sIH", self.ident, size, 0)
-      ofile.write(buf)
+      # Header has already been written
       ofile.write(self.data)
     def full_str(self):
       return u'%s: (%d bytes) flags=%#x' % \
           (Id3V2.frameName(self.ident), self.size, self.flags)
+    def to_json(self):
+      global longform
+      data = self.data
+      if not longform and len(data) > 1024:
+        return self.ident, "(%d bytes of data)" % len(data)
+      else:
+        return self.ident, self.data.encode("base64")
     def __repr__(self):
       return '<Frame \"%s\" size=%d flags=%#x>' % \
           (self.ident, self.size, self.flags)
@@ -805,13 +979,13 @@ class Id3V2(Id3):
     def __unicode__(self):
       return u'%s (%d bytes)' % (self.ident, self.size)
     def __eq__(self, other):
-      """Without knowing more about the frame type, we consider two frames to be
-      equal if they have the same ident."""
+      """Without knowing more about the frame type, we consider two
+      frames to be equal if they have the same ident."""
       return self.ident == other.ident
 
   class TextFrame(Frame):
-    def __init__(self):
-      Id3V2.Frame.__init__(self)
+    def __init__(self, id3v2):
+      Id3V2.Frame.__init__(self, id3v2)
       self.iencoding = 0
     def read(self, ident, size, flags, ifile):
       Id3V2.Frame.read(self, ident, size, flags, ifile)
@@ -825,6 +999,8 @@ class Id3V2(Id3):
       return self
     def full_str(self):
       return u'%s: %s' % (Id3V2.frameName(self.ident), unicode(self))
+    def to_json(self):
+      return self.ident, unicode(self)
     def __repr__(self):
       return '<Text Frame "%s" size=%d flags=%#x, encoding=%d, "%s">' % \
         (self.ident, self.size, self.flags, self.iencoding, str(self))
@@ -832,22 +1008,24 @@ class Id3V2(Id3):
       return Id3V2.decode(self.data[1:], self.iencoding)
 
   class TlenFrame(TextFrame):
-    """TLEN is a text frame containing a time in ms. Convert to human-readable."""
-    def full_str(self):
-      return u'%s: %s' % (Id3V2.frameName(self.ident), unicode(self))
+    """TLEN is a text frame containing a time in ms. Convert to
+    human-readable."""
+    def set(self, ident, text, iencoding):
+      return Id3V2.TextFrame.set(self, ident, hms2ms(text), iencoding)
     def __unicode__(self):
       s = Id3V2.decode(self.data[1:], self.iencoding)
       return hms(s)
 
-  class Tcop(TextFrame):
+  class TcopFrame(TextFrame):
     """TCOP is a copyright notice. Spec says to display it accordingly."""
     def full_str(self):
-      return u'%s: Copyright © %s' % (Id3V2.frameName(self.ident), unicode(self))
+      return u'%s: Copyright © %s' % \
+        (Id3V2.frameName(self.ident), unicode(self))
 
   class TxxxFrame(Frame):
     """Holds a description and value."""
-    def __init__(self):
-      Id3V2.Frame.__init__(self)
+    def __init__(self, id3v2):
+      Id3V2.Frame.__init__(self, id3v2)
       self.iencoding = 0
       self.desc_len = 0
       self.description = None
@@ -864,20 +1042,24 @@ class Id3V2(Id3):
       end = start + self.desc_len
       self.description = Id3V2.decode(self.data[start:end], self.iencoding).rstrip(u'\0')
       return self
-    def set(self, desc, text, iencoding):
+    def set(self, ident, desc, text, iencoding):
       nul = '\0' if iencoding in (0,3) else '\0\0'
       self.iencoding = iencoding
       self.description = desc
       desc = encode(desc, iencoding) + nul
       data = chr(iencoding) + desc + encode(text, iencoding)
       self.desc_len = len(desc)
-      Id3V2.Frame.set(self, "TXXX", len(data), 0, data)
+      Id3V2.Frame.set(self, ident, len(data), 0, data)
       return self
     def __repr__(self):
-      return '<TXXX Frame %s:"%s">' % (self.description, unicode(self))
+      return '<%s Frame %s:"%s">' % \
+        (self.ident, self.description, unicode(self))
     def full_str(self):
-      return u'%s: %s:"%s"' % \
-        (Id3V2.frameName('TXXX'), self.description, unicode(self))
+      return u'%s: %s:%s' % \
+        (Id3V2.frameName(self.ident), self.description, unicode(self))
+    def to_json(self):
+      key = self.ident + '-' + self.description
+      return key, {"description":self.description, "value":unicode(self)}
     def __unicode__(self):
       return Id3V2.decode(self.data[1+self.desc_len:], self.iencoding)
     def __eq__(self, other):
@@ -892,8 +1074,8 @@ class Id3V2(Id3):
 
   class CommFrame(Frame):
     """Holds a comment."""
-    def __init__(self):
-      Id3V2.Frame.__init__(self)
+    def __init__(self, id3v2):
+      Id3V2.Frame.__init__(self, id3v2)
       self.iencoding = 0
       self.language = None
       self.desc_len = 0
@@ -915,7 +1097,7 @@ class Id3V2(Id3):
       desc = Id3V2.decode(data[start:end], iencoding).rstrip(u'\0')
       self.description = Id3V2.decode(data[start:end], iencoding).rstrip(u'\0')
       return self
-    def set(self, language, description, comment, iencoding):
+    def set(self, ident, language, description, comment, iencoding):
       nul = '\0' if iencoding in (0,3) else '\0\0'
       if len(language) != 3: language = 'eng'
       data = chr(iencoding) + language + encode(description, iencoding) \
@@ -924,14 +1106,26 @@ class Id3V2(Id3):
       self.language = language
       self.desc_len = bstrlen(description, iencoding)
       self.description = description
-      Id3V2.Frame.set(self, "COMM", len(data), 0, data)
+      Id3V2.Frame.set(self, ident, len(data), 0, data)
       return self
     def __repr__(self):
       return '<Comment Frame %s:%s:"%s">' % \
         (self.language, self.description, str(self))
     def full_str(self):
-      return u'%s: %s:%s:"%s"' % \
-        (Id3V2.frameName('COMM'), self.language, self.description, unicode(self))
+      return u'%s: %s:%s:%s' % \
+        (Id3V2.frameName(self.ident), self.language,
+         self.description, unicode(self))
+    json_counter = 0    # Used to keep keys unique
+    def to_json(self):
+      if self.description:
+        key = '%s-%s-%d' % \
+          (self.ident, self.language, Id3V2.CommFrame.json_counter)
+        Id3V2.CommFrame.json_counter += 1
+        return key, {"language":self.language, "description":self.description,
+          "value":unicode(self)}
+      else:
+        key = '%s-%s' % (self.ident, self.language)
+        return key, {"language":self.language, "value":unicode(self)}
     def __unicode__(self):
       start = 4 + self.desc_len
       return Id3V2.decode(self.data[start:], self.iencoding)
@@ -944,8 +1138,8 @@ class Id3V2(Id3):
 
   class ApicFrame(Frame):
     """Holds an embedded picture with text description."""
-    def __init__(self):
-      Id3V2.Frame.__init__(self)
+    def __init__(self, id3v2):
+      Id3V2.Frame.__init__(self, id3v2)
       self.iencoding = 0
       self.mime_len = 0
       self.desc_len = 0
@@ -1000,13 +1194,13 @@ class Id3V2(Id3):
       return self
     def image(self):
       return data[self.mime_len + self.desc_len + 2:]
-    def write(self, id3, ofile):
-      Id3V2.Frame.write(self, id3, ofile)
+    def write(self, ofile):
+      Id3V2.Frame.write(self, ofile)
       if self.filename:
         with open(self.filename, "rb") as ifile:
           _copy_data(ifile, ofile, os.path.getsize(self.filename))
     def write_image(self, destdir):
-      ext = self.mime_type.split('/')[1]
+      ext = self.mime_type.split('/')[-1]
       filename = Id3V2.IMAGE_TYPES[self.picture_type] + '.' + ext
       filename = os.path.join(destdir, filename)
       end = self.mime_len + self.desc_len + 2
@@ -1019,8 +1213,15 @@ class Id3V2(Id3):
     def full_str(self):
       end = self.mime_len + self.desc_len + 2
       return u'%s: %s, "%s", %d bytes' % \
-        (Id3V2.frameName('APIC'), Id3V2.IMAGE_TYPES[self.picture_type],
+        (Id3V2.frameName(self.ident), Id3V2.IMAGE_TYPES[self.picture_type],
         self.description, self.size-end)
+    def to_json(self):
+      end = self.mime_len + self.desc_len + 2
+      key = '%s-%s' % (self.ident, Id3V2.IMAGE_TYPES[self.picture_type])
+      rval = {"pictureType": Id3V2.IMAGE_TYPES[self.picture_type],
+        "size":self.size-end}
+      if self.description: rval["description"] = self.description
+      return key, rval
     def __unicode__(self):
       if self.description:
         return u'Picture %s(%s)' % \
@@ -1032,25 +1233,190 @@ class Id3V2(Id3):
       return self.ident == other.ident and \
           self.picture_type == other.picture_type
 
+  class PicFrame(ApicFrame):
+    """Holds an embedded picture with text description; Id3v2.2."""
+    def read(self, ident, size, flags, ifile):
+      Id3V2.Frame.read(self, ident, size, flags, ifile)
+      data = self.data
+      self.iencoding = ord(data[0])
+      self.mime_len = 3
+      self.mime_type = data[1:4]
+      self.picture_type = ord(self.data[4])
+      self.desc_len = bstrlen(data[5:], self.iencoding)
+      self.filename = None
+      start = 5
+      end = start + self.desc_len
+      self.description = Id3V2.decode(self.data[start:end], self.iencoding).rstrip(u'\0')
+      # TODO: maybe we don't need to keep the image in memory
+      return self
+    def set(self, filename, picture_type, desc, iencoding):
+      # No need to read the file data here; we'll just copy it
+      # from the file later.
+      if not filename: mime_type = 'None'
+      elif filename.lower().endswith('jpeg'): mime_type = "jpg"
+      else: mime_type = os.path.splitext(filename.lower())[1][:3]
+      nul = '\0' if iencoding in (0,3) else '\0\0'
+      picture_type = Id3V2.IMAGE_TYPES.index(picture_type)
+      data = chr(iencoding) + mime_type + \
+        chr(picture_type) + encode(desc, iencoding) + nul
+      self.iencoding = iencoding
+      self.mime_len = 3
+      self.desc_len = bstrlen(desc, iencoding)
+      self.filename = filename
+      self.mime_type = mime_type
+      self.picture_type = picture_type
+      self.description = desc
+      size = len(data) + os.path.getsize(filename)
+      Id3V2.Frame.set(self, "PIC", size, 0, data)
+      return self
+    def dummy(self, picture_type):
+      """Create a dummy APIC frame to pass to del_frame()"""
+      # No need to read the file data here; we'll just copy it
+      # from the file later.
+      self.ident = 'PIC'
+      self.picture_type = Id3V2.IMAGE_TYPES.index(picture_type)
+      return self
+
   @staticmethod
   def frameName(name):
     global longform
     if longform:
       if name in Id3V2.FRAME_TYPES:
         return "%s (%s)" % (name, Id3V2.FRAME_TYPES[name])
+      elif name in Id3V2.FRAME_TYPES_2:
+        return "%s (%s)" % (name, Id3V2.FRAME_TYPES_2[name])
       else:
         return "%s (unknown)" % name
     else:
       return name
 
+FRAME_CLASSES = { \
+  "TLEN": Id3V2.TlenFrame,
+  "TLE": Id3V2.TlenFrame,
+  "TCOP": Id3V2.TcopFrame,
+  "TCR": Id3V2.TcopFrame,
+  "TXXX": Id3V2.TxxxFrame,
+  "TXX": Id3V2.TxxxFrame,
+  "COMM": Id3V2.CommFrame,
+  "COM": Id3V2.CommFrame,
+  "APIC": Id3V2.ApicFrame,
+  "PIC": Id3V2.PicFrame,
+}
+
+
+class Id3V22(Id3V2):
+  """Handler for Id3V2.2 tags"""
+  def __init__(self, major=2):
+    Id3V2.__init__(self, major)
+    self.frame_header_size = 6
+
+  def read_frame_header(self, ifile):
+    """Read an Id3v2.2 frame header"""
+    head = ifile.read(6)
+    if head[0] == '\0': return (None, 0,0)
+    ident, size = struct.unpack("3s3s", head)
+    size = reduce(lambda a,b: a<<8|b, [ord(b) for b in size])
+    return (ident, size, 0)
+
+  def write_frame_header(self, frame, ofile):
+    buf = self.ident[:3] + Id3V22.int3(size)
+    ofile.write(buf)
+
+  @staticmethod
+  def int3(i):
+    """Return 3-byte int"""
+    return chr(i>>16&0xff) + chr(i>>8&0xff) + chr(i&0xff)
+
+class Id3V23(Id3V2):
+  """Handler for Id3V2.3 tags"""
+  # Id3v2.3 frame flags
+  FF3_TAG_ALTER = 0x8000
+  FF3_FILE_ALTER = 0x4000
+  FF3_READ_ONLY = 0x2000
+  FF3_COMPRESSION = 0x0080
+  FF3_ENCRYPTION = 0x0040
+  FF3_GROUP = 0x0020
+
+  def __init__(self, major=3):
+    Id3V2.__init__(self, major)
+    self.frame_header_size = 10
+
+  def read_frame_header(self, ifile):
+    head = ifile.read(10)
+    if head[0] == '\0': return (None, 0,0)
+    #print "header:", [c for c in head]
+    ident, size, flags = struct.unpack(">4sIH", head)
+    # There may be extra data in the frame. For now, read
+    # and discard it.
+    if flags & Id3V23.FF3_COMPRESSION:
+      decompressed_size = ifile.read(4)
+      size -= 4
+    if flags & Id3V23.FF3_ENCRYPTION:
+      encryption_method = ifile.read(1)
+      size -= 1
+    if flags & Id3V23.FF3_GROUP:
+      group = ifile.read(1)
+      size -= 1
+    return (ident, size, flags)
+
+  def write_frame_header(self, frame, ofile):
+    """Write frame header to file."""
+    buf = struct.pack(">4sIH", frame.ident, frame.size, 0)
+    ofile.write(buf)
+
+
+
+class Id3V24(Id3V23):
+  """Handler for Id3V2.4 tags"""
+  # Id3v2.4 frame flags
+  FF4_TAG_ALTER = 0x4000
+  FF4_FILE_ALTER = 0x2000
+  FF4_READ_ONLY = 0x1000
+  FF4_GROUP = 0x0040
+  FF4_COMPRESSION = 0x0008
+  FF4_ENCRYPTION = 0x0004
+  FF4_UNSYNC = 0x0002
+  FF4_DATA_LEN = 0x0001
+
+  def __init__(self, major=4):
+    Id3V23.__init__(self, major)
+
+  def read_frame_header(self, ifile):
+    head = ifile.read(10)
+    if head[0] == '\0': return (None, 0,0)
+    #print "header:", [c for c in head]
+    ident, size, flags = struct.unpack(">4sIH", head)
+    size = Id3V2.syncsafe(size)
+    # There may be extra data in the frame. For now, read
+    # and discard it.
+    if flags & Id3V24.FF4_GROUP:
+      group = ifile.read(1)
+      size -= 1
+    if flags & Id3V24.FF4_ENCRYPTION:
+      encryption_method = ifile.read(1)
+      size -= 1
+    if flags & Id3V24.FF4_DATA_LEN:
+      decompressed_size = ifile.read(4)
+      size -= 4
+    return (ident, size, flags)
+
+  def write_frame_header(self, frame, ofile):
+    """Write frame header to file."""
+    size = Id3V2.int2syncsafe(frame.size)
+    buf = struct.pack(">4sIH", frame.ident, size, 0)
+    ofile.write(buf)
+
 
 #       MINOR UTILITIES
 #       Mostly dealing with converting things into other things
 
-def int2str(i):
-  """Convert an int to a string. If i == None, return ''."""
-  if i is None: return ""
-  return str(i)
+def _get_one(d, keys):
+  """Iterate through the keys until one is found in the dict. Return that
+  dict entry, or None if not found."""
+  for k in keys:
+    if k in d:
+      return d[k]
+  return None
 
 digits_re = re.compile(r'''\d+''')
 
@@ -1078,6 +1444,16 @@ def hms(s):
   if h: return u"%d:%2.2d:%2.2d.%3.3d" % (h,m,s,ms)
   if m: return u"%d:%2.2d.%3.3d" % (m,s,ms)
   return u"%d.%3.3d" % (s,ms)
+
+def hms2ms(s):
+  """Convert h:m:s.sss to ms"""
+  hms = s.split(':')
+  ms = 0
+  if '.' in hms[-1]:
+    hms[-1], ms = hms[-1].split('.')
+  sec = reduce(lambda a,b: a*60+b, [int(s) for s in hms])
+  ms = sec*1000 + int(ms)
+  return str(ms)
 
 def bstrlen(data, encoding = 0):
   """Count bytes until a zero is found, count includes terminator."""
@@ -1117,19 +1493,24 @@ def main():
   global verbose, shortform, longform, do_id3v1, do_id3v2
   global id3v2_version, out_format, encoding, iencoding
 
+  TERM_ENC = locale.getpreferredencoding() or 'UTF-8'
+
   write_images = None
+  write_json = False
+  read_json = None
 
   # Get arguments with getopt
   long_opts = ['help', 'long-help', 'genres', "frame-types",
       "delete",
       "add-image=", "remove-image=", "write-images=",
-      "image-types", "encoding=", "2.3", "2.4"]
+      "image-types", "encoding=", "2.2", "2.3", "2.4",
+      "from-json="]
 
   # Options that modify the ID3 tags are saved, and executed in order
   # later.
   cmds = []
   try:
-    (optlist, args) = getopt.getopt(sys.argv[1:], 'hHvls12f:a:A:t:c:n:G:Y:T:', long_opts)
+    (optlist, args) = getopt.getopt(sys.argv[1:], 'hHvlsj12f:a:A:t:c:n:G:Y:T:', long_opts)
     for flag, value in optlist:
       if flag in ('-h', '--help'):
         print usage
@@ -1144,6 +1525,8 @@ def main():
         longform = True
       elif flag == '-s':
         shortform = True
+      elif flag == '-j':
+        write_json = True
       elif flag == '-f':
         out_format = value
       elif flag == '-1':
@@ -1157,6 +1540,8 @@ def main():
         cmds.append((flag, value.decode(TERM_ENC)))
       elif flag == "--delete":
         cmds.append((flag, None))
+      elif flag == '--from-json':
+        read_json = value
       elif flag == '--write-images':
         write_images = value
       elif flag == '--genres':
@@ -1172,9 +1557,13 @@ def main():
         encoding = value
         try:
           iencoding = Id3V2.ENCODINGS.index(encoding)
-        except IndexError:
-          encoding = "utf8"
-          iencoding = 3
+        except (ValueError, IndexError):
+          print >>sys.stderr, "Encoding %s not recognized" % value
+          print >>sys.stderr, "Valid encodings are latin1, utf8, utf16, utf16-be"
+          sys.exit(2)
+      elif flag == '--2.2':
+        id3v2_version = "2.2"
+        iencoding = 0
       elif flag == '--2.3':
         id3v2_version = "2.3"
       elif flag == '--2.4':
@@ -1183,7 +1572,7 @@ def main():
     print >>sys.stderr, e
     sys.exit(2)
 
-  if not args:
+  if not args and not read_json:
     print >>sys.stderr, "Requires at least one mp3 filename\n"
     print >>sys.stderr, 'usage:'
     print >>sys.stderr, usage
@@ -1191,8 +1580,12 @@ def main():
 
   if write_images:
     rval = write_all_images(args[0], write_images)
+  elif read_json:
+    rval = read_json_data(read_json, args)
   elif cmds:
     rval = process_files(args, process_commands, cmds)
+  elif write_json:
+    rval = dump_json(args)
   else:
     rval = process_files(args, dump_id3, None)
 
@@ -1244,38 +1637,62 @@ def process_commands(filename, cmds):
   """Given a list of commands from the command line, apply them
   all to this file."""
   global iencoding, verbose, do_id3v1, do_id3v2
+
+  id3v1 = None
+  id3v2 = None
   mp3info = Mp3Info(filename)
 
   if do_id3v1:
     orig_id3v1 = Id3V1.readFromFile(filename, mp3info)
     id3v1 = process_commands_v1(filename, cmds, orig_id3v1)
 
-  try:
-    if do_id3v2:
-      orig_id3v2 = Id3V2.readFromFile(filename, mp3info)
-      if orig_id3v2: orig_size = orig_id3v2.size
-      id3v2 = process_commands_v2(filename, cmds, orig_id3v2)
-      if id3v2:
-        id3v2.compute_size()
-  except Id3V2.Id3Argument:
-    # Error message has already been printed, nothing to do here
-    # but exit.
-    return 2
+  if do_id3v2:
+    try:
+        orig_id3v2 = Id3V2.readFromFile(filename, mp3info)
+        id3v2 = process_commands_v2(filename, cmds, orig_id3v2)
+        if id3v2:
+          id3v2.compute_size()
+    except Id3V2.Id3Argument:
+      # Error message has already been printed, nothing to do here
+      # but exit.
+      return 2
 
+  return rewrite_mp3_file(filename, mp3info, do_id3v1, id3v1, do_id3v2, id3v2)
+
+
+def rewrite_mp3_file(filename, mp3info, edit1, id3v1, edit2, id3v2):
+  """Write the id3 tags to the file. Over-write existing tags in
+  place where possible, else re-write the entire file.
+  This is the one and only part of this program that actually
+  modifies an mp3 file. The "edit" flags indicate which tags to
+  modify. id3v1 and id3v2 are the new tags, or None to delete
+  the existing tag.
+
+  Note that the mp3info object will no longer be valid after this
+  function is called."""
   # Now to decide what to do with these.
   # Programming note: it might be more efficient to combine the v1 and
   # v2 editing operations, but I don't think it's worth it.
 
-  if do_id3v2:
-    # With luck, we can just overwrite the existing tag. If
-    # we're creating a new tag, deleting an old tag, or the
-    # new tag is too big, then we re-write the file.
-    if not orig_id3v2 and not id3v2:
-      pass
-    elif orig_id3v2 and id3v2 and \
-        orig_size >= id3v2.size and orig_size < id3v2.size + 8192:
+  if edit1:
+    with open(filename, "ab") as ofile:
+      if mp3info.id3v1_size > 0:
+        ofile.truncate(mp3info.id3v1_offset)
+        ofile.seek(mp3info.id3v1_offset)
+        mp3info.id3v1_size = mp3info.id3v1_offset = 0
+      if id3v1:
+        id3v1.write(ofile)
+        mp3info.id3v1_offset = mp3info.audio_offset + mp3info.audio_size
+        mp3info.id3v1_size = 128
+
+  if edit2:
+    # With luck, we can just overwrite the existing tag. If we're
+    # creating a new tag, deleting an old tag, or the new tag is
+    # too big or too small, then we re-write the file.
+    if id3v2 and mp3info.id3v2_size >= id3v2.total_size and \
+          mp3info.id3v2_size < id3v2.total_size + 10000:
       # Grow the new tag to the same size as the old one.
-      id3v2.set_size(orig_size)
+      id3v2.set_total_size(mp3info.id3v2_size)
       with open(filename, "rb+") as ofile:
         ofile.seek(mp3info.id3v2_offset)
         id3v2.write(ofile)
@@ -1294,18 +1711,6 @@ def process_commands(filename, cmds):
             ifile.seek(mp3info.id3v1_offset)
             _copy_data(ifile, ofile, mp3info.id3v1_size)
       os.rename(tmpfilename, filename)
-      # New file, new mp3info
-      if mp3info.id3v1_size > 0:
-        mp3info.id3v1_offset = os.path.getsize(filename) - 128
-
-  if do_id3v1:
-    if orig_id3v1 or id3v1:
-      with open(filename, "ab") as ofile:
-        if orig_id3v1:
-          ofile.truncate(mp3info.id3v1_offset)
-          ofile.seek(mp3info.id3v1_offset)
-        if id3v1:
-          id3v1.write(ofile)
 
   return 0
 
@@ -1325,7 +1730,7 @@ def process_commands_v1(filename, cmds, id3v1):
       lang, desc, comment = _parse_comment(value)
       id3v1.comment = comment
     elif cmd == '-n':
-      id3v1.track = digits_only(value)[:3]
+      id3v1.track = str2int(value, 0)
     elif cmd == '-G':
       id3v1.genre = str2int(value, 0)
     elif cmd == '-Y':
@@ -1334,58 +1739,78 @@ def process_commands_v1(filename, cmds, id3v1):
       id3v1 = None
   return id3v1
 
+IDENT_MAPPINGS = { '-a': ("TPE1", "TP1"),
+  '-A': ("TALB", "TAL"),
+  '-t': ("TIT2", "TT2"),
+  '-n': ("TRCK", "TRK"),
+  '-G': ("TCON", "TCO"),
+  '-Y': ("TYER", "TYE"),
+  '-c': ('COMM', "COM"),
+  '-T': ('TXXX', "TXX"),
+  "--add-image": ('APIC', 'PIC')
+}
+
 def process_commands_v2(filename, cmds, id3v2):
   """Execute all the commands in the list and return the
   id3v2 tag that results."""
+  global id3v2_version
+  im = IDENT_MAPPINGS
+  if id3v2:
+    maj = id3v2.major_version
+    imi = 1 if maj == 2 else 0
   for cmd,value in cmds:
     if cmd != '--delete' and not id3v2:
-      id3v2 = Id3V2(int(id3v2_version[2]))
+      id3v2 = Id3V2.new(int(id3v2_version[2]))
+      maj = id3v2.major_version
+      im = IDENT_MAPPINGS
+      imi = 1 if maj == 2 else 0
+    if cmd in im:
+      ident = im[cmd][imi]
     if cmd == '-a':
       id3v2.artist = value
-      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TPE1", value, iencoding), value)
+      id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, value, iencoding), value)
     elif cmd == '-A':
       id3v2.album = value
-      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TALB", value, iencoding), value)
+      id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, value, iencoding), value)
     elif cmd == '-t':
       id3v2.title = value
-      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TIT2", value, iencoding), value)
+      id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, value, iencoding), value)
     elif cmd == '-n':
-      id3v2.track = digits_only(value)[:3]
-      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TRCK", value, iencoding), value)
+      id3v2.track = str2int(value, 0)
+      id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, value, iencoding), value)
     elif cmd == '-G':
       id3v2.genre = str2int(value, 0)
-      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TCON", value, iencoding), value)
+      id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, value, iencoding), value)
     elif cmd == '-Y':
       id3v1.year = digits_only(value)[:4]
-      id3v2.add_or_del_frame(Id3V2.TextFrame().set("TYER", value, iencoding), value)
+      id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, value, iencoding), value)
     elif cmd == '-c':
       lang, desc, comment = _parse_comment(value)
       if not id3v2.comment or not desc: id3v2.comment = comment
-      id3v2.add_or_del_frame(Id3V2.CommFrame().set(lang, desc, comment, iencoding), comment)
+      id3v2.add_or_del_frame(Id3V2.CommFrame(id3v2).set(ident, lang, desc, comment, iencoding), comment)
     elif cmd == '-T':
       fields = value.split(':')
-      if fields and fields[0] == 'TXXX':
+      ident = str(fields[0])
+      if ident in ('TXXX', 'TXX'):
         if len(fields) < 3:
           print >>sys.stderr, "-T TXXX option requires <ident>:<desc>:<string>"
           print >>sys.stderr, "Use --help for command line options"
           raise Id3V2.Id3Argument("Invalid arguments")
-        ident = str(fields[0])
         desc = fields[1]
         text = fields[2]
-        id3v2.add_or_del_frame(Id3V2.TxxxFrame().set(desc, text, iencoding), text)
+        id3v2.add_or_del_frame(Id3V2.TxxxFrame(id3v2).set(ident, desc, text, iencoding), text)
       else:
         if len(fields) < 2:
           print >>sys.stderr, "-T option requires <ident>:<string>"
           print >>sys.stderr, "Use --help for command line options"
           raise Id3V2.Id3Argument("Invalid arguments")
-        ident = str(fields[0])
         text = fields[1]
-        if len(ident) != 4 or ident[0] != 'T':
+        if len(ident) != (3 if maj == 2 else 4) or ident[0] != 'T':
           print >>sys.stderr, \
               "-T option %s invalid; must start with 'T' and be exactly 4 characters long" % ident
           print >>sys.stderr, "Use --help for command line options"
           raise Id3V2.Id3Argument("Invalid arguments")
-        id3v2.add_or_del_frame(Id3V2.TextFrame().set(ident, text, iencoding), text)
+        id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, text, iencoding), text)
     elif cmd == "--add-image":
       fields = value.split(':')
       if len(fields) < 2:
@@ -1402,20 +1827,75 @@ def process_commands_v2(filename, cmds, id3v2):
       if not os.path.isfile(filename):
         print >>sys.stderr, 'Image file "%s" not found' % filename
         raise Id3V2.Id3Argument("File %s not found" % filename)
-      frame = Id3V2.ApicFrame().set(filename, picture_type, desc, iencoding)
+      if maj == 2:
+        frame = Id3V2.PicFrame(id3v2).set(filename, picture_type, desc, iencoding)
+      else:
+        frame = Id3V2.ApicFrame(id3v2).set(filename, picture_type, desc, iencoding)
       id3v2.add_frame(frame)
     elif cmd == "--remove-image":
       if value not in Id3V2.IMAGE_TYPES:
         print >>sys.stderr, 'Picture type "%s" not recognized' % value
         print >>sys.stderr, "Use --image-types for list of valid types"
         raise Id3V2.Id3Argument("Invalid arguments")
-      frame = Id3V2.ApicFrame().dummy(value)
+      frame = Id3V2.ApicFrame(id3v2).dummy(value)
       id3v2.del_frame(frame)
     elif cmd == "--delete":
       id3v2 = None
 #  if verbose:
 #    dump_id3(filename, None)
   return id3v2
+
+def dump_json(filenames):
+  global do_id3v1, do_id3v2, shortform
+  rval = 0
+  if shortform:
+    res = {}
+    if len(filenames) != 1:
+      print >>sys.stderr, "-j -s requires a single filename."
+      return 2
+    filename = filenames[0]
+    r = get_json(filename, res)
+    rval = max(rval, r)
+  else:
+    res = []
+    for filename in filenames:
+      info = {"filename":filename}
+      r = get_json(filename, info)
+      rval = max(rval, r)
+      if r == 0:
+        res.append(info)
+
+  if rval < 3:
+    ofile = codecs.getwriter('utf-8')(sys.stdout)
+    json.dump(res, ofile, indent=4, ensure_ascii=False)
+    print
+  return rval
+
+def get_json(filename, info):
+  """Read the tag info from this file into the provided dict."""
+  global do_id3v1, do_id3v2
+  try:
+    mp3info = Mp3Info(filename)
+    if do_id3v1 and mp3info.id3v1_size > 0:
+      with open(filename, "rb") as ifile:
+        id3v1 = Id3V1()
+        if id3v1.read(ifile, mp3info.id3v1_offset):
+          j = id3v1.to_json()
+          if j:
+            info["id3v1"] = j
+    if do_id3v2 and mp3info.id3v2_size > 0:
+      id3v2 = Id3V2.readFromFile(filename, mp3info)
+      j = id3v2.to_json()
+      if j:
+        info["id3v2"] = j
+    if "id3v1" not in info and "id3v2" not in info:
+      print >>sys.stderr, "%s: no id3 data" % filename
+      return 1
+    else:
+      return 0
+  except OSError as e:
+    print >>sys.stderr, e
+    return 3
 
 def write_all_images(filename, destdir):
   if not os.path.isdir(destdir):
@@ -1424,9 +1904,160 @@ def write_all_images(filename, destdir):
   mp3info = Mp3Info(filename)
   id3v2 = Id3V2.readFromFile(filename, mp3info)
   for frame in id3v2.frames:
-    if frame.ident == 'APIC':
+    if isinstance(frame, Id3V2.ApicFrame):
       frame.write_image(destdir)
   return 0
+
+def read_json_data(jsonfile, filenames):
+  """Read a json file and process its contents."""
+  try:
+    with open(jsonfile, "rb") as ifile:
+      js = json.load(ifile)
+    if isinstance(js, list):
+      for d in js:
+        rval = _read_json_d(d, None)
+    else:
+      rval = _read_json_d(js, filenames)
+    return rval
+  except (OSError,IOError) as e:
+    print >>sys.stderr, e
+    return 2
+  except ValueError as e:
+    print >>sys.stderr, "Failed to read json file:", e
+    return 3
+
+def _read_json_d(d, filenames):
+  """Process a dict object from a json file. If it contains a
+  file name, apply it to that file. Else, apply it to all the
+  files listed in filenames."""
+  if "filename" in d:
+    rval = _read_json_apply(d, d["filename"])
+  elif filenames:
+    rval = 0
+    for filename in filenames:
+      r = _read_json_apply(d, filename)
+      rval = max(rval, r)
+  else:
+    print >>sys.stderr, "No mp3 file names found in json file or arguments"
+    rval = 2
+  return rval
+
+def _read_json_apply(d, filename):
+  """Process a dict object and apply it to this file."""
+  global iencoding, verbose, do_id3v1, do_id3v2
+  rval = 0
+  raw_block = True
+  id3v1 = id3v2 = None
+  id3v1_json = id3v2_json = None
+
+  # Figure out which parts of this dict object should
+  # be applied to which tags of the file. If there's an
+  # "id3v1" element, apply it to the id3v1 tag. Ditto
+  # for "id3v2". If there's only an "id3" element, apply
+  # it to both tags. If there are neither, apply the dict
+  # itself to both tags.
+  if "id3v1" in d:
+    id3v1_json = d["id3v1"]
+    raw_block = False
+  if "id3v2" in d:
+    id3v2_json = d["id3v2"]
+    raw_block = False
+  if "id3" in d:
+    id3v1_json = id3v2_json = d["id3"]
+    raw_block = False
+  if raw_block:
+    id3v1_json = d
+    id3v2_json = d
+
+  mp3info = Mp3Info(filename)
+
+  if id3v1_json and do_id3v1:
+    orig_id3v1 = Id3V1.readFromFile(filename, mp3info)
+    id3v1 = _read_json_apply_v1(id3v1_json, orig_id3v1)
+
+  if id3v2_json and do_id3v2:
+    orig_id3v2 = Id3V2.readFromFile(filename, mp3info)
+    id3v2 = _read_json_apply_v2(id3v2_json, orig_id3v2)
+
+  rewrite_mp3_file(filename, mp3info, do_id3v1, id3v1, do_id3v2, id3v2)
+
+def _read_json_apply_v1(block, id3v1):
+  """Apply this block of key:value pairs to this id3v1 object."""
+  global iencoding, verbose, do_id3v1, do_id3v2
+  if not id3v1:
+    id3v1 = Id3V1()
+  for k,v in block.iteritems():
+    if k == "title": id3v1.title = v
+    elif k == "artist": id3v1.artist = v
+    elif k == "album": id3v1.album = v
+    elif k == "year": id3v1.year = v[:4]
+    elif k == "comment": id3v1.comment = v
+    elif k == "genre": id3v1.genre = v
+    elif k == "track": id3v1.track = v
+  return id3v1
+
+def _read_json_apply_v2(block, id3v2):
+  """Apply this block of key:value pairs to this id3v2 object."""
+  global iencoding, verbose, do_id3v2, id3v2_version
+  if id3v2:
+    isv22 = id3v2.major_version == 2
+  else:
+    isv22 = id3v2_version == "2.2"
+    id3v2 = Id3V2.new(int(id3v2_version[2]))
+  for key,value in block.iteritems():
+    key = str(key)
+    if key == "title":
+      id3v2.add_frame(Id3V2.TextFrame(id3v2).set("TT2" if isv22 else "TIT2", value, iencoding))
+    elif key == "artist":
+      id3v2.add_frame(Id3V2.TextFrame(id3v2).set("TP1" if isv22 else "TPE1", value, iencoding))
+    elif key == "album":
+      id3v2.add_frame(Id3V2.TextFrame(id3v2).set("TAL" if isv22 else "TALB", value, iencoding))
+    elif key == "year":
+      id3v2.add_frame(Id3V2.TextFrame(id3v2).set("TYE" if isv22 else "TYER", value, iencoding))
+    elif key == "comment":
+      id3v2.add_frame(Id3V2.CommFrame(id3v2).set("COM" if isv22 else "COMM",
+        value.get("language", "eng"), value.get("description", ""),
+        value.get("value",""), iencoding))
+    elif key == "genre":
+      id3v2.add_frame(Id3V2.TextFrame(id3v2).set("TCO" if isv22 else "TCON", str(value), iencoding))
+    elif key == "track":
+      id3v2.add_frame(Id3V2.TextFrame(id3v2).set("TRK" if isv22 else "TRCK", str(value), iencoding))
+    elif key.startswith('TXXX') or key.startswith('TXX'):
+      key = key.split('-')[0]
+      id3v2.add_frame(Id3V2.TxxxFrame(id3v2).set(key,
+        value.get("description", ""), value.get("value", ""), iencoding))
+    elif key in ('TLEN', 'TLE'):
+      id3v2.add_frame(Id3V2.TlenFrame(id3v2).set(key, value, iencoding))
+    elif key[0] == 'T':
+      id3v2.add_frame(Id3V2.TextFrame(id3v2).set(key, value, iencoding))
+    elif key.startswith('COMM') or key.startswith('COM'):
+      key = key.split('-')[0]
+      id3v2.add_frame(Id3V2.CommFrame(id3v2).set(key,
+        value.get("language","eng"), value.get("description",""),
+        value.get("value",""), iencoding))
+    elif key[0] == 'W':
+      id3v2.add_frame(Id3V2.UrlFrame(id3v2).set(key, value, iencoding))
+    elif key.startswith('APIC'):
+      if "file" not in value:
+        print >>sys.stderr, 'Json error, APIC frame requires "file" property'
+      else:
+        id3v2.add_frame(Id3V2.ApicFrame(id3v2).set(value["file"],
+          value.get("pictureType","OTHER"), value.get("description",""), iencoding))
+    elif key.startswith('PIC'):
+      if "file" not in value:
+        print >>sys.stderr, 'Json error, PIC frame requires "file" property'
+      else:
+        id3v2.add_frame(Id3V2.PicFrame(id3v2).set(value["file"],
+          value.get("pictureType","OTHER"), value.get("description",""), iencoding))
+    else:
+      # If the value is "(nnn bytes of data)", then it wasn't encoded and
+      # there's nothing to decode.
+      if value[0] != '(':
+        value = value.decode('base64')
+        id3v2.add_frame(Id3V2.Frame(id3v2).set(key, len(value), 0, value))
+  if id3v2:
+    id3v2.compute_size()
+  return id3v2
 
 def _parse_comment(value):
   args = value.split(':')
@@ -1442,10 +2073,17 @@ def list_genres():
     print "%3d  %s" % (genre, Id3.GENRES[genre])
 
 def list_frame_types():
+  print "Id3v2.3 and 2.4 frame types:"
   ftypes = Id3V2.FRAME_TYPES.keys()
   ftypes.sort()
   for ftype in ftypes:
     print "%4s  %s" % (ftype, Id3V2.FRAME_TYPES[ftype])
+  print
+  print "Id3v2.2 frame types:"
+  ftypes = Id3V2.FRAME_TYPES_2.keys()
+  ftypes.sort()
+  for ftype in ftypes:
+    print "%3s  %s" % (ftype, Id3V2.FRAME_TYPES_2[ftype])
 
 def list_image_types():
     for itype in Id3V2.IMAGE_TYPES:
