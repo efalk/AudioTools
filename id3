@@ -10,10 +10,16 @@ Options:
     With no editing options (below), dumps the id3 tag(s)
     and exits.
 
-    Output controls:
+    Help:
 
-	-h --help      short help
+	-h --help      short help (this list)
 	-H --long-help long help
+
+	--genres	list genres and exit
+	--frame-types	list Id3v2 frame types and exit
+	--image-types	list picture types and exit
+
+    Output controls:
 
 	-v	verbose
 	-s	short form
@@ -23,10 +29,6 @@ Options:
 	-2	only deal with Id3v2
 
 	-f fmt	Control output format; see long help
-
-	--genres	list genres and exit
-	--frame-types	list Id3v2 frame types and exit
-	--image-types	list picture types and exit
 
 	--write-images dir	Extract all images to dir
 
@@ -40,9 +42,9 @@ Options:
 	-c str		Set comment
 	-c [[lang:]desc:]str Set comment with metadata. Lang defaults to "eng"
 	-n N		Set track # (may be a string for Id3v2)
-	-G genre	Set genre by number (Id3v1)
-	-G genre	Set genre by number or string (Id3v2)
-	-Y nnnn		Set year
+	-g N		Set genre by number
+	-g str		Set genre by string (Id3v2 only)
+	-y nnnn		Set year
 
 	-T fid:str	Set arbitrary text frame, see --frame-types for list
 	-T fid:		Delete text frame
@@ -56,15 +58,47 @@ Options:
 	--add-image file:TYPE[:description]	Add a picture.
 	--remove-image TYPE			Remove a picture
 
-	--encoding latin1|utf8|utf16|utf16-be	Set encoding (default utf8)
-	--2.2					Write Id3v2.2 tag
-	--2.3					Write Id3v2.3 tag
-	--2.4					Write Id3v2.4 tag (default)
+	--encoding latin1|utf16|utf16-be|utf8	Set encoding (default utf8)
+
+	--2.2			Write Id3v2.2 tag
+	--2.3			Write Id3v2.3 tag
+	--2.4			Write Id3v2.4 tag (default)
+	--padding n		Padding for new id3v2 tags (1024)
 """
 
 long_help = """
+Details:
 
-	Output formats: Format string is literal text plus directives, e.g.
+	Some Id3v2 text frames map to Id3v1 fields, e.g. setting the
+	artist with -a also sets the TPE1 frame.
+
+	Id3v1 text fields are always encoded with latin1. Avoid
+	strings that can't be encoded with latin1 if you're writing
+	an id3v1 tag, or if you've selected "--encoding latin1" for
+	Id3v2.  Unencodable characters will be replaced with '?'.
+
+	The --2.x and --padding flags are ignored if there is already
+	an existing Id3v2 tag.
+
+	Editing options are processed in order. For example,
+	    --remove -a "Annie Lennox" -t "Sisters"
+	would erase the existing ID3 tag and start a new one.
+
+	Where possible, this tool over-writes the existing tags in place.
+	Otherwise, it will re-write the entire .mp3 file, which may take
+	longer and requires the use of a temporary file.
+
+	By default, new Id3v2 tags are written with a certain amount
+	of padding, allowing them to be modified later without needing
+	to rewrite the entire mp3 file. The default padding is 1024
+	bytes, but you can change this with the --padding option. This
+	has no effect when modifying existing Id3v2 tags.
+
+Output format:
+
+	The '-f' option lets you specify the format of the output.
+
+	Format string is literal text plus directives, e.g.
 	    '%f: "%t", artist=%a, album=%A, length=%TLEN'
 
 	  Directives are:
@@ -74,28 +108,9 @@ long_help = """
 	      %t	    title
 	      %c	    comment
 	      %n	    track #
-	      %G	    genre
-	      %Y	    year
+	      %g	    genre
+	      %y	    year
 	      %XXXX	    Id3V2 frame
-
-	Some Id3v2 text frames map to Id3v1 fields, e.g. setting the
-	artist with -a also sets the TPE1 frame.
-
-	Id3v1 text fields are always encoded with latin1. Avoid
-	strings that can't be encoded with latin1 if you're writing
-	an id3v1 tag, or if you've selected "--encoding latin1".
-	Unencodable characters will quietly be replaced with '?'.
-
-	The --2.x flags are ignored if there is already an existing
-	Id3v2 tag.
-
-	Editing options are processed in order. For example,
-	    --remove -a "Annie Lennox" -t "Sisters"
-	would erase the existing ID3 tag and start a new one.
-
-	Where possible, this tool over-writes the existing tags in place.
-	Otherwise, it will re-write the entire .mp3 file, which may take
-	longer and requires the use of a temporary file.
 
 Json:
 
@@ -117,6 +132,10 @@ Json:
 	    ...
 	  ]
 
+	  This form does not require any filenames on the command line.
+	  This form lets you modify multiple files. This is the format
+	  emitted with the "-j" option.
+
 
 	2: A single id3 info block with a filename:
 
@@ -124,6 +143,8 @@ Json:
 	   "id3v1": {_id3_block_},
 	   "id3v2": {_id3_block_},
 	  }
+
+	  This form does not require any filenames on the command line.
 
 
 	3: A single id3 info block with no filename. This information will
@@ -138,13 +159,6 @@ Json:
 	   on every file listed on the command line:
 
 	  {_id3_block_}
-
-	The first two forms don't require any filenames on the command line.
-	The first form lets you modify multiple files. This is the format
-	emitted with the "-j" option.
-
-	The second two forms require file name(s) on the command line and
-	are applied equally to all files.
 
 
 	An _id3 block_ may consist of the following keys:
@@ -181,7 +195,7 @@ Exit codes:
 Bugs and issues:
 
 	Id3v2.2, Id3v2.3, and Id3v2.4 define different sets of
-	frames. This app doesn't care and supports any kind of frame
+	frames. This app doesn't care, and supports any kind of frame
 	on any version of Id3v2.  For example, any frame whose ident
 	starts with 'T' is accepted as a text frame.
 
@@ -202,7 +216,206 @@ Bugs and issues:
 	to json in base64 format. If you need support for any of
 	these, contact the author; they shouldn't be too hard to
 	add.
+
+	Extended headers, compression, and encryption are not
+	supported.  I've never encountered an mp3 file in the wild
+	that uses these.
+
+Python API Notes:
+
+	Read the source code for notes on the API which allows you
+	to use this module from your own python script.
 """
+
+
+# API NOTES
+#
+#  Sample usage:
+#
+#	mp3info = Mp3Info(filename)
+#	id3v1 = Id3V1.read_from_file(filename, mp3info)
+#	id3v2 = Id3V2.read_from_file(filename, mp3info)
+#	id3v1.author = u"Billy Joel"
+#	id3v2.add_frame(Id3V2.TextFrame(id3v2).set("TPE1", u"Billy Joel", 3))
+#	rewrite_mp3_file(filename, mp3info, True, id3v1, True, id3v2)
+#
+#
+#
+#  Mp3Info(filename)
+#	Returns an Mp3Info object that describes the locations of
+#	the Id3v1 and Id3v2 tags in the file. Several of the classes
+#	and functions below require this.
+#
+#  Id3
+#	Abstract class for an Id3 tag. An Id3 object contains:
+#		version		e.g. "1.1" or "2.3"
+#		title		unicode string
+#		artist		unicode string
+#		album		unicode string
+#		year		unicode string
+#		comment		unicode string
+#		genre		a number; see GENRES, below
+#		track		a number
+#
+#  Id3.GENRES	a dict of number:"genre" pairs
+#
+#
+#  Id3V1	Class for an Id3v1 tag
+#
+#  Id3V1.new()	Factory class method that returns a new Id3V1 object
+#
+#  Id3V1.read_from_file(filename, mp3info)
+#	Class method: read Id3v1 tag from file. Return None if not found.
+#
+#  id3v1.write(ofile)
+#	Write this id3v1 tag to the given file. Caller must open the
+#	file for append. File should not already contain an Id3v1 tag.
+#	In practice, you should call rewrite_mp3_file() instead.
+#
+#  id3v1.to_dict()
+#	Return a dict containing the contents of this id3 tag, suitable
+#	for e.g. writing to a json file.
+#
+#
+#  Id3V2
+#	Abstract class for an Id3v2 tag. An Id3v2 object contains
+#	the same elements as an Id3 object plus:
+#		frames		array of Id3v2 frames in the tag
+#		content_size	total size of all of the frames
+#		size		size of the tag, including padding
+#		total_size	size of the tag, including padding and headers
+#
+#  Id3V2.IMAGE_TYPES	Array of image type names
+#  Id3V2.FRAME_TYPES_2	Dict of Id3v2.2 frame types and their descriptions
+#  Id3V2.FRAME_TYPES	Dict of Id3v2.[34] frame types and their descriptions
+#  Id3V2.ENCODINGS	Array of supported string encodings
+#
+#  Id3V22	Class for an Id3v2.2 tag
+#  Id3V23	Class for an Id3v2.3 tag
+#  Id3V24	Class for an Id3v2.4 tag
+#
+#  Id3V2.new(major)
+#	Return a new empty Id3V2 tag. Major is 2, 3, or 4.
+#
+#  Id3V2.read_from_file(filename, mp3info)
+#	Class method: read Id3v2 tag from file. Return None if not found.
+#
+#  id3v2.write(ofile)
+#	Write this id3v2 tag to the given file. Caller must open the
+#	file for write and seek to the location where the tag should
+#	be written.
+#	In practice, you should call rewrite_mp3_file() instead.
+#
+#  id3v2.to_dict()
+#	Return a dict containing the contents of this id3 tag, suitable
+#	for e.g. writing to a json file.
+#
+#  id3v2.add_frame(frame)
+#	Add a frame to this tag. If there is a matching frame already
+#	present, it is removed.
+#
+#  id3v2.append(frame)
+#	Unconditionally add a frame to the tag, even if a matching
+#	frame is already present.
+#
+#  id3v2.del_frame(frame)
+#	Delete a frame from this tag. Input may be a minimal frame whose
+#	ident, and possibly other elements match the frame you want
+#	to delete.
+#
+#  id3v2.compute_size()
+#	Recompute the content_size, size, and total_size for this tag.
+#	Always call this before calling set_size() or set_total_size().
+#
+#  id3v2.set_size(size)
+#	Sets the size of the tag. Raise Id3V2.Id3Error if the requested
+#	size is less than content_size.
+#
+#  id3v2.set_total_size(size)
+#	Sets the total size of the tag.
+#
+#  Id3V2.Frame		Generic frame type, superclass to other frame types
+#
+#  Id3V2.Frame(id3v2)
+#	Constructor, id3v2 is the tag this frame is associated with
+#
+#  frame.set(ident, size, flags, data)
+#	Set the properties of a frame. Size should normally be len(data)
+#
+#  frame.full_str()
+#	Return human-readable description of frame. Examples:
+#	  "MCDI (Music CD identifier): (%804 bytes)"
+#	  "TPE1: Billy Joel"
+#	  "APIC: FRONT_COVER, 41234 bytes"
+#
+#  str(frame)		Returns string representation of frame (latin1)
+#  unicode(frame)	Returns unicode representation of frame
+#
+#  Id3V2.TextFrame	Text frame. Methods the same as for Frame, except:
+#
+#  textframe.set(ident, string, encoding)
+#	Sets the string and encoding of the text frame. String is always
+#	unicode; encoding determines how it will be written to a file.
+#	Encoding is an int in 0-3, indexing into ("latin1", "utf16",
+#	"utf16-be", "utf8")
+#
+#  Id3V2.TlenFrame	Text frame containing length. Identical to Text
+#			frame except that ms are converted to hh:mm:ss.sss
+#			when returned as a string.
+#
+#  Id3V2.TcopFrame	Text frame containing copyright. Identical to Text
+#			frame except that string representation is preceded
+#			by "Copyright © "
+#
+#  Id3V2.TxxxFrame	User-specified text frame. Same as TextFrame except:
+#
+#  txxxframe.set(ident, description, text, encoding)
+#	Sets the description of the text and the text. Meanings are
+#	entirely up to the user.
+#
+#  Id3V2.UrlFrame	Identical to TextFrame
+#
+#  Id3V2.CommFrame	Holds an arbitrary comment.
+#
+#  commframe.set(ident, language, description, text, encoding)
+#	Language is an ISO-639-2 value, e.g. "eng". Description and
+#	text are entirely up to the user. Both are unicode strings
+#	and are encoded in the file according to encoding.
+#
+#  Id3V2.ApicFrame	Attached picture (Id3v2.3, Id3v2.4)
+#  Id3V2.PicFrame	Attached picture (Id3v2.2)
+#
+#  apicframe.set(filename, picture_type, description, encoding)
+#	Set the attached picture from the specified file (prefer .jpg or .png)
+#	picture_type is a value from Id3V2.IMAGE_TYPES. Description
+#	is an optional description of the image, encoded in the file
+#	according to encoding.
+#
+#  apicframe.dummy(picture_type)
+#	Sets the frame's picture type, allowing the frame to be used
+#	as an argument to id3v2.del_frame().
+#
+#  apicframe.write_image(destdir [,filename])
+#	Writes this frame's image to a file in the specified directory.
+#	Default filename is based on the image type, e.g. "OTHER.jpg"
+#	or "FRONT_COVER.png"
+#
+#  apicframe.image()
+#	Returns the image data. (This is an in-memory copy in Python2.)
+#
+#
+# rewrite_mp3_file(filename, mp3info, edit1, id3v1, edit2, id3v2)
+#	Function. Rewrites one or both Id3 tags in an mp3 file.
+#	  filename	filename to modify
+#	  mp3info	mp3info for this file
+#	  edit1		flag: modify id3v1 tag
+#	  id3v1		new Id3V1 tag to write
+#	  edit2		flag: modify id3v2 tag
+#	  id3v2		new Id3V2 tag to write
+#	If possible, the mp3 file is modified in place. Otherwise, it
+#	is replaced entirely, which can take longer if it's large.
+#	If edit1 is True but id3v1 is None, then any existing Id3V1
+#	frame is deleted. Ditto for edit2,id3v2.
 
 # Programming note: most strings are stored internally as unicode (the
 # exception is the ident field). The str() and repr() functions will
@@ -227,6 +440,7 @@ longform = False
 encoding = 'utf-8'
 iencoding = 3
 id3v2_version = "2.3"
+padding = 1024
 
 TERM_ENC = 'UTF-8'      # Terminal encoding.
 
@@ -344,10 +558,10 @@ class Id3(object):
 
   def formatted(self, format_str):
     tokens, remainder = Id3.format_scanner.scan(format_str)
-    tokens = [self.getField(x) if x.startswith('%') else x for x in tokens]
+    tokens = [self.get_field(x) if x.startswith('%') else x for x in tokens]
     return u''.join(tokens) + remainder
 
-  def getField(self, field):
+  def get_field(self, field):
     if field == '%%': return '%'
     if field == '%f': return self.filename
     if field == '%a': return self.artist
@@ -355,8 +569,8 @@ class Id3(object):
     if field == '%t': return self.title
     if field == '%c': return self.comment
     if field == '%n': return unicode(self.track)
-    if field == '%G': return unicode(self.genre)
-    if field == '%Y': return self.year
+    if field == '%g': return unicode(self.genre)
+    if field == '%y': return self.year
     return u''
 
 
@@ -424,7 +638,7 @@ class Id3(object):
 
 class Id3V1(Id3):
   @classmethod
-  def readFromFile(cls, filename, mp3info):
+  def read_from_file(cls, filename, mp3info):
     """Given a file, read the Id3v1 tag from the end of it, if any."""
     if mp3info.id3v1_size == 0: return None
     with open(filename, "rb") as ifile:
@@ -434,6 +648,10 @@ class Id3V1(Id3):
         return id3v1
       else:
         return None
+
+  @staticmethod
+  def new():
+    return Id3V1()
 
   def __init__(self):
     Id3.__init__(self)
@@ -468,7 +686,7 @@ class Id3V1(Id3):
         title, artist, album, year, comment, 0, self.track, self.genre)
     ofile.write(buf)
 
-  def to_json(self):
+  def to_dict(self):
     """Return the _id3 block_ for this tag."""
     rval = {}
     if self.title: rval["title"] = self.title
@@ -491,7 +709,7 @@ class Id3V2(Id3):
   F_FOOTER = 0x10       # 2.4 and above only
 
   @classmethod
-  def readFromFile(cls, filename, mp3info):
+  def read_from_file(cls, filename, mp3info):
     """Given a file, read the Id3v2 tag from it, if any."""
     if mp3info.id3v2_size == 0: return None
     # All Id3V2 tags start with a 10-byte header. Read that
@@ -580,11 +798,11 @@ class Id3V2(Id3):
     if self.flags & Id3V2.F_FOOTER:
       ofile.write(buf)
 
-  def to_json(self):
+  def to_dict(self):
     """Return the _id3 block_ for this tag."""
     rval = {}
     for frame in self.frames:
-      k,v = frame.to_json()
+      k,v = frame.to_dict()
       rval[k] = v
     return rval
 
@@ -691,9 +909,9 @@ class Id3V2(Id3):
       if longform:
         print "Padding: %d bytes" % (self.size - self.content_size)
 
-  def getField(self, field):
+  def get_field(self, field):
     if len(field) == 2:
-      return Id3.getField(self, field)
+      return Id3.get_field(self, field)
     field = field[1:]
     for frame in self.frames:
       if frame.ident == field:
@@ -713,10 +931,6 @@ class Id3V2(Id3):
     """Convert int to syncsafe int."""
     buf = [i>>21 & 0x7f, i>>14 & 0x7f, i>>7 & 0x7f, i & 0x7f]
     return reduce(lambda a,b: a<<8|b, [b for b in buf])
-
-  @staticmethod
-  def readBytes(buf):
-    return reduce(lambda a,b: a<<8|b, [ord(c) for c in buf])
 
   @staticmethod
   def decode(buf, encoding):
@@ -964,7 +1178,7 @@ class Id3V2(Id3):
     def full_str(self):
       return u'%s: (%d bytes) flags=%#x' % \
           (Id3V2.frameName(self.ident), self.size, self.flags)
-    def to_json(self):
+    def to_dict(self):
       global longform
       data = self.data
       if not longform and len(data) > 1024:
@@ -999,7 +1213,7 @@ class Id3V2(Id3):
       return self
     def full_str(self):
       return u'%s: %s' % (Id3V2.frameName(self.ident), unicode(self))
-    def to_json(self):
+    def to_dict(self):
       return self.ident, unicode(self)
     def __repr__(self):
       return '<Text Frame "%s" size=%d flags=%#x, encoding=%d, "%s">' % \
@@ -1057,7 +1271,7 @@ class Id3V2(Id3):
     def full_str(self):
       return u'%s: %s:%s' % \
         (Id3V2.frameName(self.ident), self.description, unicode(self))
-    def to_json(self):
+    def to_dict(self):
       key = self.ident + '-' + self.description
       return key, {"description":self.description, "value":unicode(self)}
     def __unicode__(self):
@@ -1116,7 +1330,7 @@ class Id3V2(Id3):
         (Id3V2.frameName(self.ident), self.language,
          self.description, unicode(self))
     json_counter = 0    # Used to keep keys unique
-    def to_json(self):
+    def to_dict(self):
       if self.description:
         key = '%s-%s-%d' % \
           (self.ident, self.language, Id3V2.CommFrame.json_counter)
@@ -1171,6 +1385,7 @@ class Id3V2(Id3):
       elif filename.lower().endswith('jpg'): mime_type = "jpeg"
       else: mime_type = os.path.splitext(filename.lower())[1]
       nul = '\0' if iencoding in (0,3) else '\0\0'
+      if not desc: desc = u''
       picture_type = Id3V2.IMAGE_TYPES.index(picture_type)
       mime_type = "image/" + mime_type
       data = chr(iencoding) + mime_type + '\0' + \
@@ -1187,8 +1402,6 @@ class Id3V2(Id3):
       return self
     def dummy(self, picture_type):
       """Create a dummy APIC frame to pass to del_frame()"""
-      # No need to read the file data here; we'll just copy it
-      # from the file later.
       self.ident = 'APIC'
       self.picture_type = Id3V2.IMAGE_TYPES.index(picture_type)
       return self
@@ -1199,9 +1412,10 @@ class Id3V2(Id3):
       if self.filename:
         with open(self.filename, "rb") as ifile:
           _copy_data(ifile, ofile, os.path.getsize(self.filename))
-    def write_image(self, destdir):
+    def write_image(self, destdir, filename=None):
       ext = self.mime_type.split('/')[-1]
-      filename = Id3V2.IMAGE_TYPES[self.picture_type] + '.' + ext
+      if not filename:
+	filename = Id3V2.IMAGE_TYPES[self.picture_type] + '.' + ext
       filename = os.path.join(destdir, filename)
       end = self.mime_len + self.desc_len + 2
       with open(filename, "wb") as ofile:
@@ -1215,7 +1429,7 @@ class Id3V2(Id3):
       return u'%s: %s, "%s", %d bytes' % \
         (Id3V2.frameName(self.ident), Id3V2.IMAGE_TYPES[self.picture_type],
         self.description, self.size-end)
-    def to_json(self):
+    def to_dict(self):
       end = self.mime_len + self.desc_len + 2
       key = '%s-%s' % (self.ident, Id3V2.IMAGE_TYPES[self.picture_type])
       rval = {"pictureType": Id3V2.IMAGE_TYPES[self.picture_type],
@@ -1271,8 +1485,6 @@ class Id3V2(Id3):
       return self
     def dummy(self, picture_type):
       """Create a dummy APIC frame to pass to del_frame()"""
-      # No need to read the file data here; we'll just copy it
-      # from the file later.
       self.ident = 'PIC'
       self.picture_type = Id3V2.IMAGE_TYPES.index(picture_type)
       return self
@@ -1407,6 +1619,65 @@ class Id3V24(Id3V23):
     ofile.write(buf)
 
 
+
+# TOP-LEVEL FUNCTIONS
+
+def rewrite_mp3_file(filename, mp3info, edit1, id3v1, edit2, id3v2):
+  """Write the id3 tags to the file. Over-write existing tags in
+  place where possible, else re-write the entire file.
+  This is the one and only part of this program that actually
+  modifies an mp3 file. The "edit" flags indicate which tags to
+  modify. id3v1 and id3v2 are the new tags, or None to delete
+  the existing tag.
+
+  Note that the mp3info object will no longer be valid after this
+  function is called."""
+  global padding
+  # Now to decide what to do with these.
+  # Programming note: it might be more efficient to combine the v1 and
+  # v2 editing operations, but I don't think it's worth it.
+
+  if edit1:
+    with open(filename, "ab") as ofile:
+      if mp3info.id3v1_size > 0:
+        ofile.truncate(mp3info.id3v1_offset)
+        ofile.seek(mp3info.id3v1_offset)
+        mp3info.id3v1_size = mp3info.id3v1_offset = 0
+      if id3v1:
+        id3v1.write(ofile)
+        mp3info.id3v1_offset = mp3info.audio_offset + mp3info.audio_size
+        mp3info.id3v1_size = 128
+
+  if edit2:
+    # With luck, we can just overwrite the existing tag. If we're
+    # creating a new tag, deleting an old tag, or the new tag is
+    # too big or too small, then we re-write the file.
+    if id3v2 and mp3info.id3v2_size >= id3v2.total_size and \
+          mp3info.id3v2_size < id3v2.total_size + 10000:
+      # Grow the new tag to the same size as the old one.
+      id3v2.set_total_size(mp3info.id3v2_size)
+      with open(filename, "rb+") as ofile:
+        ofile.seek(mp3info.id3v2_offset)
+        id3v2.write(ofile)
+    else:
+      # Any other case, we have to re-write the file
+      tmpfilename = filename + '.new'
+      with open(filename, "rb") as ifile:
+        with open(tmpfilename, "wb") as ofile:
+          if id3v2:
+            # Reserve a little space in the id3v2 tag for later growth
+            id3v2.set_size(id3v2.size + padding)
+            id3v2.write(ofile)
+          ifile.seek(mp3info.audio_offset)
+          _copy_data(ifile, ofile, mp3info.audio_size)
+          if mp3info.id3v1_size > 0:
+            ifile.seek(mp3info.id3v1_offset)
+            _copy_data(ifile, ofile, mp3info.id3v1_size)
+      os.rename(tmpfilename, filename)
+
+  return 0
+
+
 #       MINOR UTILITIES
 #       Mostly dealing with converting things into other things
 
@@ -1491,7 +1762,7 @@ out_format = None
 
 def main():
   global verbose, shortform, longform, do_id3v1, do_id3v2
-  global id3v2_version, out_format, encoding, iencoding
+  global id3v2_version, out_format, encoding, iencoding, padding
 
   TERM_ENC = locale.getpreferredencoding() or 'UTF-8'
 
@@ -1504,7 +1775,7 @@ def main():
       "delete",
       "add-image=", "remove-image=", "write-images=",
       "image-types", "encoding=", "2.2", "2.3", "2.4",
-      "from-json="]
+      "from-json=", "padding="]
 
   # Options that modify the ID3 tags are saved, and executed in order
   # later.
@@ -1535,13 +1806,15 @@ def main():
       elif flag == '-2':
         do_id3v1 = False
         do_id3v2 = True
-      elif flag in ('-a', '-A', '-t', '-c', '-n', '-G', '-Y', '-T',
+      elif flag in ('-a', '-A', '-t', '-c', '-n', '-g', '-y', '-T',
           "--add-image", "--remove-image",):
         cmds.append((flag, value.decode(TERM_ENC)))
       elif flag == "--delete":
         cmds.append((flag, None))
       elif flag == '--from-json':
         read_json = value
+      elif flag == '--padding':
+        padding = int(value)
       elif flag == '--write-images':
         write_images = value
       elif flag == '--genres':
@@ -1613,8 +1886,8 @@ def dump_id3(filename, mp3info):
   try:
     if not mp3info:
       mp3info = Mp3Info(filename)
-    id3v1 = Id3V1.readFromFile(filename, mp3info) if do_id3v1 else None
-    id3v2 = Id3V2.readFromFile(filename, mp3info) if do_id3v2 else None
+    id3v1 = Id3V1.read_from_file(filename, mp3info) if do_id3v1 else None
+    id3v2 = Id3V2.read_from_file(filename, mp3info) if do_id3v2 else None
     if id3v1 or id3v2:
       if out_format:
         if id3v1: print id3v1.formatted(out_format).encode(TERM_ENC)
@@ -1643,12 +1916,12 @@ def process_commands(filename, cmds):
   mp3info = Mp3Info(filename)
 
   if do_id3v1:
-    orig_id3v1 = Id3V1.readFromFile(filename, mp3info)
+    orig_id3v1 = Id3V1.read_from_file(filename, mp3info)
     id3v1 = process_commands_v1(filename, cmds, orig_id3v1)
 
   if do_id3v2:
     try:
-        orig_id3v2 = Id3V2.readFromFile(filename, mp3info)
+        orig_id3v2 = Id3V2.read_from_file(filename, mp3info)
         id3v2 = process_commands_v2(filename, cmds, orig_id3v2)
         if id3v2:
           id3v2.compute_size()
@@ -1658,61 +1931,6 @@ def process_commands(filename, cmds):
       return 2
 
   return rewrite_mp3_file(filename, mp3info, do_id3v1, id3v1, do_id3v2, id3v2)
-
-
-def rewrite_mp3_file(filename, mp3info, edit1, id3v1, edit2, id3v2):
-  """Write the id3 tags to the file. Over-write existing tags in
-  place where possible, else re-write the entire file.
-  This is the one and only part of this program that actually
-  modifies an mp3 file. The "edit" flags indicate which tags to
-  modify. id3v1 and id3v2 are the new tags, or None to delete
-  the existing tag.
-
-  Note that the mp3info object will no longer be valid after this
-  function is called."""
-  # Now to decide what to do with these.
-  # Programming note: it might be more efficient to combine the v1 and
-  # v2 editing operations, but I don't think it's worth it.
-
-  if edit1:
-    with open(filename, "ab") as ofile:
-      if mp3info.id3v1_size > 0:
-        ofile.truncate(mp3info.id3v1_offset)
-        ofile.seek(mp3info.id3v1_offset)
-        mp3info.id3v1_size = mp3info.id3v1_offset = 0
-      if id3v1:
-        id3v1.write(ofile)
-        mp3info.id3v1_offset = mp3info.audio_offset + mp3info.audio_size
-        mp3info.id3v1_size = 128
-
-  if edit2:
-    # With luck, we can just overwrite the existing tag. If we're
-    # creating a new tag, deleting an old tag, or the new tag is
-    # too big or too small, then we re-write the file.
-    if id3v2 and mp3info.id3v2_size >= id3v2.total_size and \
-          mp3info.id3v2_size < id3v2.total_size + 10000:
-      # Grow the new tag to the same size as the old one.
-      id3v2.set_total_size(mp3info.id3v2_size)
-      with open(filename, "rb+") as ofile:
-        ofile.seek(mp3info.id3v2_offset)
-        id3v2.write(ofile)
-    else:
-      # Any other case, we have to re-write the file
-      tmpfilename = filename + '.new'
-      with open(filename, "rb") as ifile:
-        with open(tmpfilename, "wb") as ofile:
-          if id3v2:
-            # Reserve a little space in the id3v2 tag for later growth
-            id3v2.set_size(id3v2.size + 1024)
-            id3v2.write(ofile)
-          ifile.seek(mp3info.audio_offset)
-          _copy_data(ifile, ofile, mp3info.audio_size)
-          if mp3info.id3v1_size > 0:
-            ifile.seek(mp3info.id3v1_offset)
-            _copy_data(ifile, ofile, mp3info.id3v1_size)
-      os.rename(tmpfilename, filename)
-
-  return 0
 
 def process_commands_v1(filename, cmds, id3v1):
   """Execute all the commands in the list and return the
@@ -1731,9 +1949,9 @@ def process_commands_v1(filename, cmds, id3v1):
       id3v1.comment = comment
     elif cmd == '-n':
       id3v1.track = str2int(value, 0)
-    elif cmd == '-G':
+    elif cmd == '-g':
       id3v1.genre = str2int(value, 0)
-    elif cmd == '-Y':
+    elif cmd == '-y':
       id3v1.year = digits_only(value)[:4]
     elif cmd == '--delete':
       id3v1 = None
@@ -1743,8 +1961,8 @@ IDENT_MAPPINGS = { '-a': ("TPE1", "TP1"),
   '-A': ("TALB", "TAL"),
   '-t': ("TIT2", "TT2"),
   '-n': ("TRCK", "TRK"),
-  '-G': ("TCON", "TCO"),
-  '-Y': ("TYER", "TYE"),
+  '-g': ("TCON", "TCO"),
+  '-y': ("TYER", "TYE"),
   '-c': ('COMM', "COM"),
   '-T': ('TXXX', "TXX"),
   "--add-image": ('APIC', 'PIC')
@@ -1778,10 +1996,10 @@ def process_commands_v2(filename, cmds, id3v2):
     elif cmd == '-n':
       id3v2.track = str2int(value, 0)
       id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, value, iencoding), value)
-    elif cmd == '-G':
+    elif cmd == '-g':
       id3v2.genre = str2int(value, 0)
       id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, value, iencoding), value)
-    elif cmd == '-Y':
+    elif cmd == '-y':
       id3v1.year = digits_only(value)[:4]
       id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, value, iencoding), value)
     elif cmd == '-c':
@@ -1880,12 +2098,12 @@ def get_json(filename, info):
       with open(filename, "rb") as ifile:
         id3v1 = Id3V1()
         if id3v1.read(ifile, mp3info.id3v1_offset):
-          j = id3v1.to_json()
+          j = id3v1.to_dict()
           if j:
             info["id3v1"] = j
     if do_id3v2 and mp3info.id3v2_size > 0:
-      id3v2 = Id3V2.readFromFile(filename, mp3info)
-      j = id3v2.to_json()
+      id3v2 = Id3V2.read_from_file(filename, mp3info)
+      j = id3v2.to_dict()
       if j:
         info["id3v2"] = j
     if "id3v1" not in info and "id3v2" not in info:
@@ -1902,7 +2120,7 @@ def write_all_images(filename, destdir):
     print >>sys.stderr, "--write-images requires directory."
     return 2
   mp3info = Mp3Info(filename)
-  id3v2 = Id3V2.readFromFile(filename, mp3info)
+  id3v2 = Id3V2.read_from_file(filename, mp3info)
   for frame in id3v2.frames:
     if isinstance(frame, Id3V2.ApicFrame):
       frame.write_image(destdir)
@@ -1972,11 +2190,11 @@ def _read_json_apply(d, filename):
   mp3info = Mp3Info(filename)
 
   if id3v1_json and do_id3v1:
-    orig_id3v1 = Id3V1.readFromFile(filename, mp3info)
+    orig_id3v1 = Id3V1.read_from_file(filename, mp3info)
     id3v1 = _read_json_apply_v1(id3v1_json, orig_id3v1)
 
   if id3v2_json and do_id3v2:
-    orig_id3v2 = Id3V2.readFromFile(filename, mp3info)
+    orig_id3v2 = Id3V2.read_from_file(filename, mp3info)
     id3v2 = _read_json_apply_v2(id3v2_json, orig_id3v2)
 
   rewrite_mp3_file(filename, mp3info, do_id3v1, id3v1, do_id3v2, id3v2)
