@@ -9,6 +9,7 @@ Name | What it is
 ---- | ----
 [wavtags](#wavtags) | Edit the "INFO" tags in a .wav file
 [id3](#id3) | Edit the id3 tags in a .mp3 file
+[cdinfo.py](#cdinfo) | Match a CD againt the gnudb CD database
 
 
 
@@ -253,3 +254,23 @@ Bugs and issues:
 	supported.  I've never encountered an mp3 file in the wild
 	that uses these.
 
+
+## cdinfo
+
+Yet another program that grabs track info from a CD and looks up the disc on the
+cddb database. The differences are:
+
+Every other program I've downloaded to do this eventually broke, typically because
+of missing dependencies. Many of them depended on CD utility libraries that no longer
+existed and so forth. Others depended on versions of Python that I don't
+have on my server. This version has zero dependencies outside of the standard Python
+libraries and has been tested on Python 2.6 and 3.7.
+
+This version goes to the latest incarnation of cddb, which is currently hosted
+at gnudb.gnudb.org.
+
+This is a rough draft. It works on Linux. I don't have a Mac or Windows machine
+with a CD drive, so I won't be porting it any time soon. Currently, it looks up
+the CD in question in the database and displays all matches. In the future, I'll
+add the ability to generate output in json, and to query the user to see which
+match they want.
