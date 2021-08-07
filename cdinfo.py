@@ -41,7 +41,6 @@ import string
 import struct
 import sys
 import time
-import urllib
 from time import sleep
 
 APPNAME = 'cdinfo'
@@ -50,17 +49,19 @@ VERSION = "0.2"
 default_device = "/dev/cdrom"
 
 freedb_server = "gnudb.gnudb.org"
+freedb_web_server = "gnudb.org"
 freedb_port = 8880
 #freedb_server="us.freedb.org"
 #freedb_port = 80
 
 PY3 = sys.version_info[0] >= 3
 if PY3:
-  #import urllib.request
+  import urllib.request as urllib
   from urllib.parse import urlencode
   from urllib.request import urlopen
   basestring = str
 else:
+  import urllib
   from urllib import urlencode
   from urllib2 import urlopen
 
@@ -222,7 +223,7 @@ if OS == 'Linux':
     """CdInfo class for Linux."""
     def open(self, device):
       try:
-	self.dev = open(device, "r")
+        self.dev = open(device, "r")
       except IOError as e:
         print("Failed to open %s, %s" % (device, e), file=sys.stderr)
     def tocHeader(self):
@@ -350,29 +351,41 @@ class CDDB(object):
     that item as a list of tuples."""
     global verbose
 
+    rval = []
     try:
-      if not self.sock and not self.connect():
-        return None
-      code, resp = self.cddb_send("cddb read %s %s" % (genre, key))
-      if code != 210:
-        raise ValueError("server response %d" % code)
+      if self.server == "gnudb.gnudb.org":
+	# The gnudb server has a bug in it which causes the
+	# the DYEAR and DGENRE fields to be lost if you use the API. The
+	# web interface doesn't have that issue, so we use that instead.
+	req = "http://%s/gnudb/%s/%s" % (freedb_web_server, genre, key)
+	if verbose >= 1:
+	  print("open:", req)
+	f = urllib.urlopen(req)
+      else:
+	if not self.sock and not self.connect():
+	  return None
+	code, resp = self.cddb_send("cddb read %s %s" % (genre, key))
+	if code != 210:
+	  raise ValueError("server response %d" % code)
+	f = self.sockfile
 
-      rval = []
-      line = self.sockfile.readline().rstrip()
-      if verbose >= 2:
-        print(line)
-      line = self.sockfile.readline().rstrip()
-      while not line.startswith('.'):
-        if verbose >= 2:
-          print(line)
-        if not line.startswith('#'):
-          mo = db_re.match(line)
-          if mo:
-            rval.append((mo.group(1), mo.group(2)))
-        line = self.sockfile.readline().rstrip()
+      for line in f:
+	line = line.rstrip()
+	if line .startswith('.'):
+	  break
+	if line .startswith('#'):
+	  continue
+	mo = db_re.match(line)
+	if mo:
+	  rval.append((mo.group(1), mo.group(2)))
+
+      if self.server == "gnudb.gnudb.org":
+	f.close()
+
       return rval
+
     except Exception as e:
-      print("Failed to connect to %s, %s" % (server, e), file=sys.stderr)
+      print("Failed to connect to %s, %s" % (self.server, e), file=sys.stderr)
       return None
 
 
@@ -385,7 +398,7 @@ def main():
   # Get arguments with getopt
   long_opts = ['help', 'device=', 'server=', 'port=']
   try:
-    (optlist, args) = getopt.getopt(sys.argv[1:], 'hd:s:p:u:Tvl', long_opts)
+    (optlist, args) = getopt.getopt(sys.argv[1:], 'hd:s:p:u:Tvlg:', long_opts)
     for flag, value in optlist:
       if flag in ('-h', "--help"):
         print(usage)
