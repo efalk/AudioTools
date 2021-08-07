@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf8 -*-
 
-usage = """Dump or edit ID3 data in an mp3 file.
+usage = """Display or edit ID3 data in an mp3 file.
 
 Usage:	id3 [options] file.mp3 ...
 
@@ -127,7 +127,7 @@ Json:
 	  [
 	    {"filename": "_path_",
 	     "id3v1": {_id3_block_},
-	     "id3v2": {_id3_block_},
+	     "id3v2": {_id3_block_}
 	    },
 	    ...
 	  ]
@@ -141,7 +141,7 @@ Json:
 
 	  {"filename": "_path_",
 	   "id3v1": {_id3_block_},
-	   "id3v2": {_id3_block_},
+	   "id3v2": {_id3_block_}
 	  }
 
 	  This form does not require any filenames on the command line.
@@ -151,7 +151,7 @@ Json:
 	   be applied to every file listed on the command line:
 
 	  {"id3v1": {_id3_block_},
-	   "id3v2": {_id3_block_},
+	   "id3v2": {_id3_block_}
 	  }
 
 
@@ -160,8 +160,11 @@ Json:
 
 	  {_id3_block_}
 
+	The second two forms require file name(s) on the command line and
+	are applied equally to all files.
 
-	An _id3 block_ may consist of the following keys:
+
+	An _id3_block_ may consist of the following keys:
 
 	  "title"	string (TIT2)
 	  "artist"	string (TPE1)
@@ -683,11 +686,12 @@ class Id3V1(Id3):
     year = self.year.encode('latin1', 'replace')[:4].ljust(4,'\0')
     comment = self.comment.encode('latin1', 'replace')[:28].ljust(28,'\0')
     buf = struct.pack("3s30s30s30s4s28sBBB", "TAG",
-        title, artist, album, year, comment, 0, self.track, self.genre)
+        title, artist, album, year, comment,
+	0, int(self.track), int(self.genre))
     ofile.write(buf)
 
   def to_dict(self):
-    """Return the _id3 block_ for this tag."""
+    """Return the _id3_block_ for this tag."""
     rval = {}
     if self.title: rval["title"] = self.title
     if self.artist: rval["artist"] = self.artist
@@ -799,7 +803,7 @@ class Id3V2(Id3):
       ofile.write(buf)
 
   def to_dict(self):
-    """Return the _id3 block_ for this tag."""
+    """Return the _id3_block_ for this tag."""
     rval = {}
     for frame in self.frames:
       k,v = frame.to_dict()
@@ -1206,6 +1210,8 @@ class Id3V2(Id3):
       self.iencoding = ord(self.data[0])
       return self
     def set(self, ident, text, iencoding):
+      if isinstance(text, int):
+	text = str(text)
       data = chr(iencoding) + encode(text, iencoding)
       size = len(data)
       self.iencoding = iencoding
@@ -1781,7 +1787,7 @@ def main():
   # later.
   cmds = []
   try:
-    (optlist, args) = getopt.getopt(sys.argv[1:], 'hHvlsj12f:a:A:t:c:n:G:Y:T:', long_opts)
+    (optlist, args) = getopt.getopt(sys.argv[1:], 'hHvlsj12f:a:A:t:c:n:g:y:T:', long_opts)
     for flag, value in optlist:
       if flag in ('-h', '--help'):
         print usage
@@ -2000,7 +2006,7 @@ def process_commands_v2(filename, cmds, id3v2):
       id3v2.genre = str2int(value, 0)
       id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, value, iencoding), value)
     elif cmd == '-y':
-      id3v1.year = digits_only(value)[:4]
+      id3v2.year = digits_only(value)[:4]
       id3v2.add_or_del_frame(Id3V2.TextFrame(id3v2).set(ident, value, iencoding), value)
     elif cmd == '-c':
       lang, desc, comment = _parse_comment(value)
