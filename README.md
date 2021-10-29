@@ -1,4 +1,4 @@
-# A collection of utilities for manipulating audio tools
+# A collection of utilities for manipulating audio files
 
 Frankly, sox(1) does most of everything you ever need from
 the command line, and Audacity gives you everything you need
@@ -31,11 +31,11 @@ documentation. Can add images to the id3 tag or extract them. Includes the
 
 Written in python.
 
-Dump or edit ID3 data in an mp3 file.
+    Display or edit ID3 data in an mp3 file.
 
-Usage:	id3 [options] file.mp3 ...
+    Usage:	id3 [options] file.mp3 ...
 
-Options:
+    Options:
 
     With no editing options (below), dumps the id3 tag(s)
     and exits.
@@ -96,7 +96,7 @@ Options:
 	--padding n		Padding for new id3v2 tags (1024)
 
 
-Details:
+    Details:
 
 	Some Id3v2 text frames map to Id3v1 fields, e.g. setting the
 	artist with -a also sets the TPE1 frame.
@@ -123,7 +123,7 @@ Details:
 	bytes, but you can change this with the --padding option. This
 	has no effect when modifying existing Id3v2 tags.
 
-Output format:
+    Output format:
 
 	The '-f' option lets you specify the format of the output.
 
@@ -141,7 +141,7 @@ Output format:
 	      %y	    year
 	      %XXXX	    Id3V2 frame
 
-Json:
+    Json:
 
 	The -j option writes a json file to stdout. Normally, it
 	generates an array of output as shown in the first example
@@ -156,7 +156,7 @@ Json:
 	  [
 	    {"filename": "_path_",
 	     "id3v1": {_id3_block_},
-	     "id3v2": {_id3_block_},
+	     "id3v2": {_id3_block_}
 	    },
 	    ...
 	  ]
@@ -170,18 +170,17 @@ Json:
 
 	  {"filename": "_path_",
 	   "id3v1": {_id3_block_},
-	   "id3v2": {_id3_block_},
+	   "id3v2": {_id3_block_}
 	  }
 
 	  This form does not require any filenames on the command line.
 
 
 	3: A single id3 info block with no filename. This information will
-	   be applied to every file listed on the command line. This is the format
-	   emitted with the "-j -s" option.
+	   be applied to every file listed on the command line:
 
 	  {"id3v1": {_id3_block_},
-	   "id3v2": {_id3_block_},
+	   "id3v2": {_id3_block_}
 	  }
 
 
@@ -194,7 +193,7 @@ Json:
 	are applied equally to all files.
 
 
-	An _id3 block_ may consist of the following keys:
+	An _id3_block_ may consist of the following keys:
 
 	  "title"	string (TIT2)
 	  "artist"	string (TPE1)
@@ -207,6 +206,7 @@ Json:
 	  "Tttt"	string, use --frame-types for a list
 	  "TXXX"	{"description":DESC, "value":STRING}
 	  "Wwww"	url string, use --frame-types for a list
+	  "WXXX"	{"description":DESC, "value":STRING}
 	  "COMM"	{"lang":LANG¹, "description":DESC, "value":STRING}
 	  "APIC"	{"type":TYPE², "description":DESC, "file":PATH}
 
@@ -218,17 +218,17 @@ Json:
 	  ² Use --image-types for a list of image types.
 
 
-Exit codes:
+    Exit codes:
 
 	0 - command accepted, successful return
 	1 - ID3 data not found
 	2 - user error
 	3 - system error
 
-Bugs and issues:
+    Bugs and issues:
 
 	Id3v2.2, Id3v2.3, and Id3v2.4 define different sets of
-	frames. This app doesn't care and supports any kind of frame
+	frames. This app doesn't care, and supports any kind of frame
 	on any version of Id3v2.  For example, any frame whose ident
 	starts with 'T' is accepted as a text frame.
 
@@ -253,6 +253,12 @@ Bugs and issues:
 	Extended headers, compression, and encryption are not
 	supported.  I've never encountered an mp3 file in the wild
 	that uses these.
+
+    Python API Notes:
+
+	Read the source code for notes on the API which allows you
+	to use this module from your own python script.
+
 
 
 ## cdinfo

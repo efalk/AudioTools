@@ -30,7 +30,7 @@ Options:
 
 	-f fmt	Control output format; see long help
 
-	--write-images dir	Extract all images to dir
+	--write-images <dir>	Extract all images to <dir>
 
     Edit Id3 tags:
 
@@ -41,36 +41,45 @@ Options:
 	-t str		Set title
 	-c str		Set comment
 	-c [[lang:]desc:]str Set comment with metadata. Lang defaults to "eng"
-	-n N		Set track # (may be a string for Id3v2)
-	-g N		Set genre by number
+	-n n		Set track # (may be a string for Id3v2)
+	-g n		Set genre by number
 	-g str		Set genre by string (Id3v2 only)
 	-y nnnn		Set year
 
-	-T fid:str	Set arbitrary text frame, see --frame-types for list
+	-T fid:str	Set arbitrary text frame, see --frame-types for list of <fid> values
 	-T fid:		Delete text frame
 
-	-T TXXX:descr:str	Set TXXX frame.
-	-T TXXX:desc:		Delete TXXX frame.
+	-T TXXX:descr:str	Set "TXXX" frame.
+	-T TXXX:desc:		Delete "TXXX" frame.
 
-	--from-json file	Read tags from json file.
+	--from-json <file>	Read tags from json file.
 	--delete		delete Id3 tag(s)
 
-	--add-image file:TYPE[:description]	Add a picture.
-	--remove-image TYPE			Remove a picture
+	--add-image <file>:<type>[:description]	Add a picture.
+	--remove-image <type>			Remove a picture
 
-	--encoding latin1|utf16|utf16-be|utf8	Set encoding (default utf8)
+	--encoding latin1|utf16|utf16-be|utf8	Set encoding, id3v2 only (default utf8)
 
 	--2.2			Write Id3v2.2 tag
 	--2.3			Write Id3v2.3 tag
 	--2.4			Write Id3v2.4 tag (default)
 	--padding n		Padding for new id3v2 tags (1024)
+
 """
 
 long_help = """
 Details:
 
-	Some Id3v2 text frames map to Id3v1 fields, e.g. setting the
-	artist with -a also sets the TPE1 frame.
+	When writing Id3v2 tags, the -a, -A, -t, -c, -n, -g, and -y options map to the
+	following named tags:
+
+	  -a	TPE1
+	  -A	TALB
+	  -t	TIT2
+	  -c	COMM
+	  -y	TYER
+	  -n	TRCK
+	  -g	TCON
 
 	Id3v1 text fields are always encoded with latin1. Avoid
 	strings that can't be encoded with latin1 if you're writing
