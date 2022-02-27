@@ -9,39 +9,47 @@
 #include "myendian.h"
 
 
-void
+int
 utf16LE_wchar(uint16_t *in, wchar_t *out, int len)
 {
     uint16_t c, c2;
+    int olen = 0;
 
     while (--len >= 0) {
 	c = swaple16(*in++);
-	if (c < 0xD800 || c >= 0xE00) {
+	if (c < 0xD800 || c > 0xDFFF) {
 	    *out++ = c;
+            ++olen;
 	} else {
 	    c2 = swaple16(*in++); --len;
-	    *out++ = (c & 0x3ff) | (c2 & 0x3ff);
+	    *out++ = ((c & 0x3ff)<<10) | (c2 & 0x3ff);
+            ++olen;
 	}
     }
+    return olen;
 }
 
-void
+int
 utf16BE_wchar(uint16_t *in, wchar_t *out, int len)
 {
     uint16_t c, c2;
+    int olen = 0;
 
     while (--len >= 0) {
 	c = swapbe16(*in++);
-	if (c < 0xD800 || c >= 0xE00) {
+	if (c < 0xD800 || c > 0xDFFF) {
 	    *out++ = c;
+            ++olen;
 	} else {
 	    c2 = swapbe16(*in++); --len;
-	    *out++ = (c & 0x3ff) | (c2 & 0x3ff);
+	    *out++ = ((c & 0x3ff)<<10) | (c2 & 0x3ff);
+            ++olen;
 	}
     }
+    return olen;
 }
 
-void
+int
 utf16BOM_wchar(uint16_t *in, wchar_t *out, int len)
 {
     uint16_t bom;

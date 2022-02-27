@@ -839,7 +839,7 @@ dumpId3Text(Frame *frame, FrameType *frameType)
 {
     TextFrame *tf = (TextFrame *)frame;
     wchar_t *buffer = NULL;
-    int nchar;
+    int nchar, len;
 
     switch (tf->encoding) {
       case ID3_ENCODING_LATIN1:
@@ -855,8 +855,8 @@ dumpId3Text(Frame *frame, FrameType *frameType)
 	    fprintf(stderr, "Out of memory in dumpId3Text\n");
 	    goto exit;
 	}
-	utf16BOM_wchar((uint16_t *)tf->string, buffer, nchar);
-	buffer[nchar] = 0;
+	len = utf16BOM_wchar((uint16_t *)tf->string, buffer, nchar);
+	buffer[len] = 0;
 	printf("  %4.4s %s: %S\n",
 	    frame->identifier, frameType->description, (wchar_t *)buffer);
 	break;
@@ -867,8 +867,8 @@ dumpId3Text(Frame *frame, FrameType *frameType)
 	    fprintf(stderr, "Out of memory in dumpId3Text\n");
 	    goto exit;
 	}
-	utf16BE_wchar((uint16_t *)tf->string, buffer, nchar);
-	buffer[nchar] = 0;
+	len = utf16BE_wchar((uint16_t *)tf->string, buffer, nchar);
+	buffer[len] = 0;
 	printf("  %4.4s %s: %S\n",
 	    frame->identifier, frameType->description, (wchar_t *)buffer);
 	break;
