@@ -2,31 +2,6 @@
 
 from __future__ import print_function
 
-usage = """Simple interface to cddb database. Linux only at present.
-
-For now, only enough functionality to support gnudb.gnudb.org
-cd database.
-
-Usage:  template [options] arguments
-
-        -d /dev/cdrom           specify cdrom device
-        -s host                 specify server (gnudb.gnudb.org)
-        -p port                 specify port (80)
-        -u username             specify username
-        -l                      long form, show data for all matches
-        -v                      verbose
-        -T                      test mode
-
-Exit codes:
-
-        0 - command accepted, successful return
-        2 - user error
-        3 - system error, e.g. unable to open device
-        4 - sign error, probably bad protocol
-        5 - sign error: buffer full
-        6 - sign error: unrecognized response
-"""
-
 import array
 import errno
 import fcntl
@@ -75,6 +50,45 @@ else:
     OS = 'Unknown'
     # TODO: other operating systems as the need arises.
 
+if OS != "MacOS":
+  usage = """Simple interface to cddb database. Linux only at present.
+
+For now, only enough functionality to support gnudb.gnudb.org
+cd database.
+
+Usage:  template [options] arguments
+
+        -d /dev/cdrom           specify cdrom device
+        -s host                 specify server (gnudb.gnudb.org)
+        -p port                 specify port (80)
+        -u username             specify username
+        -l                      long form, show data for all matches
+        -v                      verbose
+        -T                      test mode
+
+Exit codes:
+
+        0 - command accepted, successful return
+        2 - user error
+        3 - system error, e.g. unable to open device
+        4 - sign error, probably bad protocol
+        5 - sign error: buffer full
+        6 - sign error: unrecognized response
+"""
+
+else:
+  usage = """
+Note: it's probably not worth doing this for MacOS, as MacOS handles
+audio CDs very elegantly. If you pop a music CD into a CD drive on
+a Mac, it gets mounted as /Volumes/<title of the CD>/ and all the
+music tracks appear as .aiff files in that directory.
+
+In addition, Apple Music pops up on your screen and asks if you
+want to copy the CD into your music library and it goes into
+"~/Music/iTunes/iTunes Media/<artist>/<album>/*.m4a" (mpeg-4 format).
+"""
+
+
 
 verbose = 0
 user = None
@@ -92,10 +106,10 @@ CDROM_LEADOUT = 0xAA
 #       the CD. Contains system-specific code.
 
 class CdInfo(object):
+
   """Obtain track info from a CD. Device may be a path, file object, or
   integer file descriptor. If not specified, uses an os-appropriate
   default path. Set to None to defer opening the device."""
-
   @staticmethod
   def FromDevice(device=default_device):
     """Create CdInfo object from device path, device fd, or file object."""
@@ -354,33 +368,33 @@ class CDDB(object):
     rval = []
     try:
       if self.server == "gnudb.gnudb.org":
-	# The gnudb server has a bug in it which causes the
-	# the DYEAR and DGENRE fields to be lost if you use the API. The
-	# web interface doesn't have that issue, so we use that instead.
-	req = "http://%s/gnudb/%s/%s" % (freedb_web_server, genre, key)
-	if verbose >= 1:
-	  print("open:", req)
-	f = urllib.urlopen(req)
+        # The gnudb server has a bug in it which causes the
+        # the DYEAR and DGENRE fields to be lost if you use the API. The
+        # web interface doesn't have that issue, so we use that instead.
+        req = "http://%s/gnudb/%s/%s" % (freedb_web_server, genre, key)
+        if verbose >= 1:
+          print("open:", req)
+        f = urllib.urlopen(req)
       else:
-	if not self.sock and not self.connect():
-	  return None
-	code, resp = self.cddb_send("cddb read %s %s" % (genre, key))
-	if code != 210:
-	  raise ValueError("server response %d" % code)
-	f = self.sockfile
+        if not self.sock and not self.connect():
+          return None
+        code, resp = self.cddb_send("cddb read %s %s" % (genre, key))
+        if code != 210:
+          raise ValueError("server response %d" % code)
+        f = self.sockfile
 
       for line in f:
-	line = line.rstrip()
-	if line .startswith('.'):
-	  break
-	if line .startswith('#'):
-	  continue
-	mo = db_re.match(line)
-	if mo:
-	  rval.append((mo.group(1), mo.group(2)))
+        line = line.rstrip()
+        if line .startswith('.'):
+          break
+        if line .startswith('#'):
+          continue
+        mo = db_re.match(line)
+        if mo:
+          rval.append((mo.group(1), mo.group(2)))
 
       if self.server == "gnudb.gnudb.org":
-	f.close()
+        f.close()
 
       return rval
 
